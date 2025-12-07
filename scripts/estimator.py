@@ -15,6 +15,10 @@ class BaseEstimator:
     ) -> float:
         return 0.0
 
+    @property
+    def higher_is_better(self) -> bool:
+        return True
+
 
 class RandomEstimator(BaseEstimator):
     def __repr__(self):
@@ -50,6 +54,10 @@ class MSP(BaseEstimator):
         logits: torch.Tensor,
     ) -> float:
         return float(logprobs.sum().detach().cpu())
+
+    @property
+    def higher_is_better(self) -> bool:
+        return True
     
 class MTE(BaseEstimator):
     def __repr__(self):
@@ -69,6 +77,10 @@ class MTE(BaseEstimator):
         token_entropies = -torch.sum(torch.exp(all_log_probs) * all_log_probs, dim=-1)
 
         return token_entropies.mean()
+
+    @property
+    def higher_is_better(self) -> bool:
+        return False
 
 
 ESTIMATOR_MAP = {

@@ -1,5 +1,5 @@
 defaults:
-  - model: ministral-8b
+  - model: mistral-7b
   - _self_
 
 seed: 42

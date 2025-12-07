@@ -16,7 +16,6 @@ from datasets import load_dataset
 from dotenv import load_dotenv
 from omegaconf import DictConfig
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
-from bitsandbytes.optim import PagedAdamW
 from torch.optim import AdamW
 from transformers import (
     AutoModelForCausalLM,
@@ -222,8 +221,6 @@ def main(config: DictConfig):
 
     tokenizer.padding_side = "left"
     for name, estimator in ESTIMATOR_MAP.items():
-        if name != "None":
-            continue
         logger.info(f"Preparing DITTO training for method: {name}")
         
         adapter_name = f"{name}_policy_model"
@@ -242,6 +239,7 @@ def main(config: DictConfig):
             pad_token_id=tokenizer.pad_token_id,
             tokenizer=tokenizer,
             estimator=estimator,
+            higher_is_better=estimator.higher_is_better,
         )
         
         dpo_trainer = DITTOTrainer(

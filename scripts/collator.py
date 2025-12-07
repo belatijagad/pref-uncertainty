@@ -45,55 +45,6 @@ class DITTOCollator(DataCollatorForPreference):
     def set_mode(self, *, training: bool) -> None:
         self.mode = "train" if training else "eval"
 
-    # def resample(
-    #     self,
-    #     step: int,
-    #     model: PreTrainedModel,
-    #     tokenizer: PreTrainedTokenizerBase,
-    #     dataset: Dataset | IterableDataset,
-    # ) -> None:
-    #     """
-    #     Generates new responses from the model and updates the cache.
-    #     """
-    #     self.sampled_step = step
-    #     self.cache.setdefault(step, {})
-
-    #     prompts = list(dataset["prompt"])
-        
-    #     (
-    #         prompt_input_ids, 
-    #         generated_input_ids, 
-    #         scores_view, 
-    #         logits_view
-    #     ) = generate_model_outputs(
-    #         prompts=prompts,
-    #         model=model,
-    #         tokenizer=tokenizer,
-    #         gen_kwargs=self.gen_kwargs,
-    #     )
-
-    #     for prompt, pr_ids, gen_ids, scores, logits in zip(
-    #         prompts,
-    #         prompt_input_ids, generated_input_ids,
-    #         scores_view, logits_view, strict=True
-    #     ):
-    #         cache_slot = self.cache[step].setdefault(prompt, [])
-
-    #         # For each generated sequences for the same prompt
-    #         for pr_id, gen_id, score, logit in zip(
-    #             pr_ids, gen_ids, scores, logits, strict=True
-    #         ):
-    #             cache_slot.append(
-    #                 {
-    #                     "score": self.estimator(gen_id, score, logit),
-    #                     "prompt_input_ids": pr_id,
-    #                     "generated_input_ids": gen_id,
-    #                 }
-    #             )
-        
-    #     if torch.cuda.is_available():
-    #         torch.cuda.empty_cache()
-
     def resample(
         self,
         step: int,
@@ -102,17 +53,13 @@ class DITTOCollator(DataCollatorForPreference):
         dataset: Dataset | IterableDataset,
     ) -> None:
         """
-        Generates new responses from the model, updates the cache, 
-        and logs decoded text to generations.txt.
+        Generates new responses from the model and updates the cache.
         """
-        import os
-        
         self.sampled_step = step
         self.cache.setdefault(step, {})
 
         prompts = list(dataset["prompt"])
         
-        # Generate outputs
         (
             prompt_input_ids, 
             generated_input_ids, 
@@ -125,40 +72,26 @@ class DITTOCollator(DataCollatorForPreference):
             gen_kwargs=self.gen_kwargs,
         )
 
-        # Open file in Append mode
-        log_file = "generations.txt"
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(f"\n{'='*20} STEP {step} {'='*20}\n")
-
-            for prompt, pr_ids, gen_ids, scores, logits in zip(
-                prompts,
-                prompt_input_ids, generated_input_ids,
-                scores_view, logits_view, strict=True
+        for prompt, pr_ids, gen_ids, scores, logits in zip(
+            prompts,
+            prompt_input_ids, generated_input_ids,
+            scores_view, logits_view, strict=True
+        ):
+            cache_slot = self.cache[step].setdefault(prompt, [])
+            single_prompt_tensor = pr_ids[0] 
+            
+            # For each generated sequences for the same prompt
+            for pr_id, gen_id, score, logit in zip(
+                pr_ids, gen_ids, scores, logits, strict=True
             ):
-                cache_slot = self.cache[step].setdefault(prompt, [])
-
-                # pr_ids shape is (Num_Return_Sequences, Prompt_Len)
-                # We only need the 1D sequence for the cache.
-                single_prompt_tensor = pr_ids[0] 
-
-                for gen_id, score, logit in zip(gen_ids, scores, logits, strict=True):
-                    
-                    calculated_score = self.estimator(gen_id, score, logit)
-                    decoded_response = tokenizer.decode(gen_id, skip_special_tokens=True)
-                    
-                    f.write(f"[PROMPT]: {prompt}\n")
-                    f.write(f"[OUTPUT]: {decoded_response}\n")
-                    f.write(f"[SCORE]:  {calculated_score:.4f}\n")
-                    f.write("-" * 40 + "\n")
-
-                    cache_slot.append(
-                        {
-                            "score": calculated_score,
-                            "prompt_input_ids": single_prompt_tensor, # <--- FIXED: Now 1D
-                            "generated_input_ids": gen_id,
-                        }
-                    )
-
+                cache_slot.append(
+                    {
+                        "score": self.estimator(gen_id, score, logit),
+                        "prompt_input_ids": single_prompt_tensor,
+                        "generated_input_ids": gen_id,
+                    }
+                )
+        
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
