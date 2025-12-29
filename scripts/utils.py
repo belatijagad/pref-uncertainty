@@ -2,6 +2,7 @@ import random
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 from peft import PeftModel, get_peft_model_state_dict, set_peft_model_state_dict
@@ -29,60 +30,44 @@ def generate_model_outputs(
     gen_kwargs: dict[str, Any],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     tokenizer.padding_side = "left"
-    inputs = tokenizer(
-        prompts, 
-        return_tensors="pt", 
-        padding=True, 
-        add_special_tokens=False 
-    ).to(model.device)
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
-    prompt_len = inputs["input_ids"].shape[1]
+    prompt_ids_list, gen_ids_list, scores_list, logits_list = [], [], [], []
 
-    with torch.inference_mode():
-        outputs = model.generate(
-            input_ids=inputs["input_ids"],
-            attention_mask=inputs["attention_mask"], # Explicitly pass mask for left-padding safety
-            pad_token_id=tokenizer.pad_token_id,
-            output_scores=True,
-            return_dict_in_generate=True,
-            **gen_kwargs,
-        )
-    
-    raw_logits = torch.stack(outputs.scores, dim=1).cpu()
+    for prompt in prompts:
+        inputs = tokenizer(prompt, return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
+        prompt_len = inputs["input_ids"].shape[1]
+        with torch.inference_mode():
+            outputs = model.generate(
+                **inputs,
+                pad_token_id=tokenizer.pad_token_id,
+                output_scores=True,
+                return_dict_in_generate=True,
+                **gen_kwargs,
+            )
 
-    transition_scores = model.compute_transition_scores(
-        outputs.sequences,
-        outputs.scores,
-        normalize_logits=False,
-    ).cpu()
+        sequences = outputs.sequences.detach().cpu()              # [n_ret, total_len]
+        scores = [s.detach().cpu() for s in outputs.scores]       # list of [n_ret, vocab]
+        del outputs
 
-    if torch.cuda.is_available():
-        del inputs
-        torch.cuda.empty_cache()
+        prompt_ids = sequences[:, :prompt_len].contiguous()       # [n_ret, prompt_len]
+        gen_ids = sequences[:, prompt_len:].contiguous()          # [n_ret, gen_len]
 
-    batch_size = len(prompts)
-    num_return_sequences = gen_kwargs.get("num_return_sequences", 1)
+        logits = torch.stack(scores, dim=1)                       # [n_ret, gen_len, vocab]
+        trans_scores = model.compute_transition_scores(sequences, scores, normalize_logits=False)
 
-    prompt_input_ids = (
-        outputs.sequences[:, :prompt_len]
-        .cpu()
-        .contiguous()
-        .view(batch_size, num_return_sequences, -1)
-    )
+        prompt_ids_list.append(prompt_ids)
+        gen_ids_list.append(gen_ids)
+        scores_list.append(trans_scores)
+        logits_list.append(logits)
 
-    generated_sequences = outputs.sequences[:, prompt_len:]
-    generated_input_ids = (
-        generated_sequences.cpu()
-        .contiguous()
-        .view(batch_size, num_return_sequences, -1)
-    )
+    # Pad to batch
+    pad_id = tokenizer.pad_token_id or 0
+    prompt_input_ids = torch.nn.utils.rnn.pad_sequence(prompt_ids_list, batch_first=True, padding_value=pad_id)
+    generated_input_ids = torch.nn.utils.rnn.pad_sequence(gen_ids_list, batch_first=True, padding_value=pad_id)
 
-    scores_view = transition_scores.contiguous().view(
-        batch_size, num_return_sequences, -1
-    )
-
-    logits_view = raw_logits.contiguous().view(
-        batch_size, num_return_sequences, -1, raw_logits.size(-1)
-    )
+    max_gen_len = max(t.size(1) for t in scores_list)
+    scores_view = torch.stack([F.pad(t, (0, max_gen_len - t.size(1)), value=0.0) for t in scores_list], dim=0)
+    logits_view = torch.stack([F.pad(t, (0, 0, 0, max_gen_len - t.size(1)), value=0.0) for t in logits_list], dim=0)
 
     return prompt_input_ids, generated_input_ids, scores_view, logits_view

@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn.functional as F
 
@@ -21,6 +22,9 @@ class BaseEstimator:
 
 
 class RandomEstimator(BaseEstimator):
+    def __init__(self):
+        self._rng = torch.Generator()
+
     def __repr__(self):
         return "Random"
     
@@ -30,7 +34,9 @@ class RandomEstimator(BaseEstimator):
         logprobs: torch.Tensor,
         logits: torch.Tensor,
     ) -> torch.Tensor:
-        return torch.rand(1)
+        seed = int.from_bytes(os.urandom(8), "little")
+        self._rng.manual_seed(seed)
+        return torch.rand(1, generator=self._rng, device=logits.device)
 
 
 class MSP(BaseEstimator):
