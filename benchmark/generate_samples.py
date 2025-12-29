@@ -1,8 +1,6 @@
 import os
-import sys
 import random
 import logging
-import importlib
 from pathlib import Path
 from typing import Any
 
@@ -15,16 +13,8 @@ from datasets import Dataset, DatasetDict, IterableDataset, IterableDatasetDict,
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 from huggingface_hub import repo_exists
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-utils_module = importlib.import_module("scripts.utils")
-seed_everything = utils_module.seed_everything
-generate_model_outputs = utils_module.generate_model_outputs
-
-estimators = importlib.import_module("scripts.estimator")
-ESTIMATOR_MAP = estimators.ESTIMATOR_MAP
+from scripts.utils import generate_model_outputs, seed_everything
+from scripts.estimator import ESTIMATOR_MAP
 
 logger = logging.getLogger(__name__)
 logging.getLogger("transformers.pipelines").setLevel(logging.WARNING)

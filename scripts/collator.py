@@ -39,7 +39,7 @@ class DITTOCollator(DataCollatorForPreference):
         if self.tokenizer is None:
             raise ValueError("Tokenizer must be provided to `DITTOCollator`.")
         
-        if self.pad_token_id == None:
+        if self.pad_token_id is None:
             self.pad_token_id = self.tokenizer.pad_token_id
 
     def set_mode(self, *, training: bool) -> None:
@@ -81,8 +81,8 @@ class DITTOCollator(DataCollatorForPreference):
             single_prompt_tensor = pr_ids[0] 
             
             # For each generated sequences for the same prompt
-            for pr_id, gen_id, score, logit in zip(
-                pr_ids, gen_ids, scores, logits, strict=True
+            for gen_id, score, logit in zip(
+                gen_ids, scores, logits, strict=True
             ):
                 cache_slot.append(
                     {

@@ -1,6 +1,5 @@
 import gc
 import os
-import sys
 import json
 import logging
 from pathlib import Path
@@ -23,10 +22,6 @@ from transformers import (
 )
 from trl import DPOConfig, SFTConfig, SFTTrainer
 from huggingface_hub import repo_exists, file_exists
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.trainer import DITTOTrainer
 from scripts.callback import (
