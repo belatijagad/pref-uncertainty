@@ -24,6 +24,7 @@ dependencies = [
     "trl>=0.25.1",
     "pydantic>=2.12.4",
     "flash-attn",
+    "openai",
 ]
 
 [tool.uv.sources]
