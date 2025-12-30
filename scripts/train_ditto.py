@@ -34,6 +34,7 @@ from scripts.utils import (
     seed_everything,
 )
 from scripts.estimator import ESTIMATOR_MAP
+from scripts.tracker import Tracker
 
 
 
@@ -229,12 +230,16 @@ def main(config: DictConfig):
         clone_adapter(cast(PeftModel, model), "ref_model", adapter_name)
         model.set_adapter(adapter_name)
 
+        # Log generations, uncertainty score
+        tracker = Tracker()
+
         data_collator = DITTOCollator(
             **config.sampler,
             pad_token_id=tokenizer.pad_token_id,
             tokenizer=tokenizer,
             estimator=estimator,
             higher_is_better=estimator.higher_is_better,
+            tracker=tracker,
         )
         
         dpo_trainer = DITTOTrainer(
@@ -250,7 +255,6 @@ def main(config: DictConfig):
                 **config.training_args.dpo,
                 **config.training_args.general,
             ),
-            # optimizer_cls_and_kwargs=(PagedAdamW, config.optim_args.dpo),
             optimizer_cls_and_kwargs=(AdamW, config.optim_args.dpo),
             processing_class=tokenizer,
             train_dataset=dpo_dataset,
@@ -260,10 +264,13 @@ def main(config: DictConfig):
                     model, tokenizer, dpo_dataset, data_collator, config.sampler
                 ),
             ],
+            # Track results
+            tracker=tracker,
         )
         
         dpo_trainer.train()
         dpo_trainer.save_model()
+        tracker.save()
         
         # Cleanup
         del dpo_trainer

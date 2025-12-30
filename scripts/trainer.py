@@ -1,34 +1,18 @@
-from __future__ import annotations
-from typing import Optional, Callable
+from typing import Literal, override
 
-import torch
-from datasets import Dataset
-from torch.utils.data import DataLoader
 from trl.trainer.dpo_trainer import DPOTrainer
 
+from scripts.tracker import Tracker
 
 class DITTOTrainer(DPOTrainer):
-    """Modify the eval_dataloader behavior to not use resampled (cached) generations"""
 
-    def _get_dataloader(
-        self,
-        dataset: Dataset,
-        description: str,
-        batch_size: int,
-        sampler_fn: Optional[Callable[[Dataset], torch.utils.data.Sampler]] = None,
-        is_training: bool = False,
-        dataloader_key: Optional[str] = None,
-    ) -> DataLoader:
+    def __init__(self, *args, tracker: Tracker = None, **kwargs):
+        self.tracker = tracker
+        super().__init__(*args, **kwargs)
 
-        data_collator = self.data_collator
-        if hasattr(data_collator, "set_mode"):
-            data_collator.set_mode(training=is_training)
-
-        return super()._get_dataloader(
-            dataset=dataset,
-            description=description,
-            batch_size=batch_size,
-            sampler_fn=sampler_fn,
-            is_training=is_training,
-            dataloader_key=dataloader_key,
-        )
+    @override
+    def store_metrics(self, metrics: dict[str, float], train_eval: Literal["train", "eval"] = "train") -> None:
+        for key, value in metrics.items():
+            self._stored_metrics[train_eval][key].append(value)
+        # Add tracker for metrics
+        self.tracker.add_metrics(metrics)
