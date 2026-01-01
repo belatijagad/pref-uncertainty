@@ -1,7 +1,6 @@
 # DITTO Authors: Omar Shaikh, Michelle S. Lam, Joey Hejna, Yijia Shao, Hyundong Cho, Michael S. Bernstein, Diyi Yang
 # Copyright 2020-2025 The HuggingFace Team. All rights reserved.
 
-import math
 import random
 from typing import Any
 from dataclasses import dataclass, field
@@ -139,7 +138,7 @@ class DITTOCollator(DataCollatorForPreference):
                     curr_score, past_score = float(current["score"]), float(past["score"])
 
                     # Rejection sampling
-                    margin = math.abs(curr_score - past_score)
+                    margin = abs(curr_score - past_score)
                     if margin < self.rejection_thresh:
                         continue
 
@@ -154,7 +153,7 @@ class DITTOCollator(DataCollatorForPreference):
                     noisy_pairs.append((
                         prompt_input_ids, 
                         chosen["generated_input_ids"], 
-                        rejected["generated_input_ids"]
+                        rejected["generated_input_ids"],
                         # Uncertainty scores
                         (float(chosen["score"]), float(rejected["score"])),
                     ))
@@ -210,7 +209,7 @@ class DITTOCollator(DataCollatorForPreference):
         # else:
         n_expert = int(len(expert_samples) * self.frac_expert)
         n_replay = int(len(replay_samples) * self.frac_replay)
-        n_noisy  = int(len(noisy_samples)  * self.frac_noisy)
+        n_noisy  = int(len(noisy_samples)  * self.frac_noisy) # NEED TO FIX; make it lazy
 
         expert_sampled = random.sample(expert_samples, min(len(expert_samples), n_expert))
         replay_sampled = random.sample(replay_samples, min(len(replay_samples), n_replay))
@@ -220,7 +219,7 @@ class DITTOCollator(DataCollatorForPreference):
             tracker_logging = {
                 "sampled_data": [
                     (self.tokenizer.decode(chosen), self.tokenizer.decode(rejected))
-                    for chosen, rejected, _, _
+                    for _, chosen, rejected, _
                     in noisy_sampled
                 ],
                 "uncertainty": [
@@ -229,7 +228,7 @@ class DITTOCollator(DataCollatorForPreference):
                     in noisy_sampled
                 ],
                 "margin": [
-                    math.abs(chosen_score - rejected_score)
+                    abs(chosen_score - rejected_score)
                     for _, _, _, (chosen_score, rejected_score) 
                     in noisy_sampled
                 ],

@@ -14,39 +14,20 @@ class Tracker:
         self.samples = []
 
     def add_generations(self, _generations: dict[str, any]):
-        # Each step will be like this
-        # {
-        #     "step": 0,
-        #     "generations": {
-        #         "prompt_1": ["gen_1", ...],
-        #         "prompt_2": ["gen_2", ...],
-        #     }
-        # }
         generations = _generations.copy()
         generations["step"] = self.internal_step
-        self.generations.extend(generations)
+        self.generations.append(generations)
 
     def add_collator_sampling(self, _samples: dict[str, any]):
-        # Each step will be like this
-        # {
-        #     "step": 1,
-        #     "sampled_data": [0, 1],
-        #     "uncertainty": [[0.5, 0.7], [0.2, 0.3]],
-        #     "margin": [0.2, 0.1],
-        #     
-        #     # concatenated in the add_metrics
-        #     "metrics": {
-        #         "what": "ever"
-        #     }
-        # }
         samples = _samples.copy()
         samples["step"] = self.internal_step
+        
         self.samples.append(samples)
-        self.samples[self.internal_step] = samples
-        self.samples[self.internal_step]["step"] = self.internal_step
 
     def add_metrics(self, metrics: dict[str, any]):
-        self.samples[self.internal_step]["metrics"] = metrics
+        if self.internal_step < len(self.samples):
+            self.samples[self.internal_step]["metrics"] = metrics
+        
         self.internal_step += 1
 
     def save(self):
@@ -59,3 +40,4 @@ class Tracker:
         with self.sample_file.open("w") as f:
             for item in self.samples:
                 f.write(json.dumps(item) + "\n")
+                

@@ -55,9 +55,9 @@ training_args:
     max_steps: 40
     max_length: 1024
     gradient_checkpointing: true
-    per_device_train_batch_size: 4
+    per_device_train_batch_size: 8
     gradient_accumulation_steps: 1
-    logging_steps: 5
+    logging_steps: 1
     padding_free: true
 
 optim_args:
@@ -73,12 +73,12 @@ sampler:
   frac_expert: 0.625
   frac_replay: 0.25
   frac_noisy: 0.125
-  rescale_batch: 2
+  rescale_batch: 4
 
   gen_kwargs:
     do_sample: true
     max_length: 1024
-    num_return_sequences: 2
+    num_return_sequences: 10
     temperature: 1.2
     repetition_penalty: 1.1
     cache_implementation: offloaded
