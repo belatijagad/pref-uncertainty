@@ -1,4 +1,4 @@
-# Uncertainty Aware Alignment
+# Preference Uncertainty
 
 ---
 
