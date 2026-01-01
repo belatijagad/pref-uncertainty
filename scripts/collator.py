@@ -11,7 +11,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 from trl.trainer.dpo_trainer import DataCollatorForPreference
 from trl.trainer.utils import pad
 
-from scripts.utils import generate_model_outputs
+from scripts.utils import generate_model_outputs, format_response
 from scripts.estimator import BaseEstimator
 from scripts.tracker import Tracker
 
@@ -63,7 +63,9 @@ class DITTOCollator(DataCollatorForPreference):
 
         logging = {"generations": {}}
 
-        prompts = list(dataset["prompt"])
+        # Extract formatted prompts for generation and raw prompts for logging
+        formatted_prompts = list(dataset["prompt"])
+        raw_prompts = list(dataset["raw_prompt"]) if "raw_prompt" in dataset.column_names else formatted_prompts
         
         (
             prompt_input_ids, 
@@ -71,38 +73,47 @@ class DITTOCollator(DataCollatorForPreference):
             scores_view, 
             logits_view
         ) = generate_model_outputs(
-            prompts=prompts,
+            prompts=formatted_prompts,
             model=model,
             tokenizer=tokenizer,
             gen_kwargs=self.gen_kwargs,
         )
 
-        for prompt, pr_ids, gen_ids, scores, logits in zip(
-            prompts,
+        for formatted_prompt, raw_prompt, pr_ids, gen_ids, scores, logits in zip(
+            formatted_prompts,
+            raw_prompts,
             prompt_input_ids, generated_input_ids,
             scores_view, logits_view, strict=True
         ):
-            cache_slot = self.cache[step].setdefault(prompt, [])
-            pr_id = pr_ids[0] 
-            prompt_str = tokenizer.decode(pr_id)
+            # Use formatted prompt as cache key (maintains consistency with training)
+            cache_slot = self.cache[step].setdefault(formatted_prompt, [])
+            pr_id = pr_ids[0]
             results = []
             
-            # For each generated sequences for the same prompt
+            # For each generated sequence for the same prompt
             for gen_id, score, logit in zip(
                 gen_ids, scores, logits, strict=True
             ):
+                generation_text = tokenizer.decode(gen_id, skip_special_tokens=True)
+                
+                formatted_response = format_response(
+                    prompt=raw_prompt,
+                    response=generation_text, 
+                    tokenizer=tokenizer
+                )
                 
                 cache_slot.append(
                     {
                         "score": self.estimator(gen_id, score, logit),
                         "prompt_input_ids": pr_id,
                         "generated_input_ids": gen_id,
+                        "formatted_response": formatted_response,  # Can be used as chosen or rejected
                     }
                 )
-                generation_str = tokenizer.decode(gen_id)
-                results.append(generation_str)
+                
+                results.append(generation_text)
 
-            logging["generations"][prompt_str] = results
+            logging["generations"][raw_prompt] = results
         
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

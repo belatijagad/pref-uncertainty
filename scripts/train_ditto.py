@@ -1,6 +1,5 @@
 import gc
 import os
-import json
 import logging
 from pathlib import Path
 from typing import cast
@@ -31,6 +30,7 @@ from scripts.callback import (
 from scripts.collator import DITTOCollator
 from scripts.utils import (
     clone_adapter,
+    format_for_training,
     seed_everything,
 )
 from scripts.estimator import ESTIMATOR_MAP
@@ -41,36 +41,6 @@ from scripts.tracker import Tracker
 logger = logging.getLogger(__name__)
 logging.getLogger("transformers.pipelines").setLevel(logging.WARNING)
 
-
-def format_for_training(prompt, chosen, tokenizer, mode="sft"):
-    prompt_msgs = [{"role": "user", "content": prompt}]
-    chosen_msgs = [{"role": "assistant", "content": chosen}]
-    full_conversation = prompt_msgs + chosen_msgs
-    
-    # SFT formatting
-    if mode == "sft":
-        text = tokenizer.apply_chat_template(full_conversation, tokenize=False)
-        return {"text": text}
-    
-    # DPO formatting
-    prompt_text = tokenizer.apply_chat_template(
-        prompt_msgs, tokenize=False, add_generation_prompt=True
-    )
-    chosen_text = tokenizer.apply_chat_template(
-        full_conversation, tokenize=False
-    )
-    
-    def add_bos(text: str) -> str:
-        if not text:
-            return text
-        text = text.replace("<s>", "").replace("</s>", "").lstrip()
-        return tokenizer.bos_token + text
-    
-    return {
-        "prompt": add_bos(prompt_text),
-        "chosen": add_bos(chosen_text),
-        "rejected": "",
-    }
 
 def load_author_subset(config):
     """Load and trim the dataset to the configured author/sample count."""
@@ -94,9 +64,12 @@ def build_sft_dataset(raw_dataset, tokenizer):
 
 def build_dpo_dataset(raw_dataset, tokenizer):
     """Build DPO dataset by formatting prompt and chosen separately."""
-    return raw_dataset.map(
-        lambda x: format_for_training(x["prompt"], x["chosen"], tokenizer, mode="dpo"),
-    )
+    def format_with_raw(example):
+        formatted = format_for_training(example["prompt"], example["chosen"], tokenizer, mode="dpo")
+        formatted["raw_prompt"] = example["prompt"]
+        return formatted
+    
+    return raw_dataset.map(format_with_raw)
         
 @hydra.main(version_base=None, config_path="../configs", config_name="ditto")
 def main(config: DictConfig):

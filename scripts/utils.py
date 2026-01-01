@@ -8,6 +8,40 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 from peft import PeftModel, get_peft_model_state_dict, set_peft_model_state_dict
 
 
+def format_response(prompt, response, tokenizer, *, add_bos=True):
+    prompt_msgs = [{"role": "user", "content": prompt}]
+    response_msgs = [{"role": "assistant", "content": response}]
+    full_conversation = prompt_msgs + response_msgs
+    
+    formatted_text = tokenizer.apply_chat_template(full_conversation, tokenize=False)
+    
+    if add_bos:
+        formatted_text = formatted_text.replace("<s>", "").replace("</s>", "").lstrip()
+        return tokenizer.bos_token + formatted_text
+    
+    return formatted_text
+
+
+def format_for_training(prompt, chosen, tokenizer, mode="sft"):
+    if mode == "sft":
+        # SFT: return full conversation as-is from chat template
+        return {"text": format_response(prompt, chosen, tokenizer, add_bos=False)}
+    
+    # DPO: separate prompt and chosen, both with BOS token
+    prompt_msgs = [{"role": "user", "content": prompt}]
+    prompt_text = tokenizer.apply_chat_template(
+        prompt_msgs, tokenize=False, add_generation_prompt=True
+    )
+    
+    prompt_text = prompt_text.replace("<s>", "").replace("</s>", "").lstrip()
+    
+    return {
+        "prompt": tokenizer.bos_token + prompt_text,
+        "chosen": format_response(prompt, chosen, tokenizer, add_bos=True),
+        "rejected": "",  # Will be filled during training
+    }
+
+
 def seed_everything(seed: int = 42) -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
