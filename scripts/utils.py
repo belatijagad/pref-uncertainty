@@ -53,7 +53,7 @@ def seed_everything(seed: int = 42) -> None:
 def clone_adapter(model: PeftModel, src_name: str, tgt_name: str) -> None:
     model.add_adapter(tgt_name, model.peft_config[src_name])
     src_weights = get_peft_model_state_dict(model, adapter_name=src_name)
-    tgt_weights = {k.replace(src_name, tgt_name): v for k, v in src_weights.items()}
+    tgt_weights = {k.replace(f".{src_name}.", f".{tgt_name}."): v.clone() for k, v in src_weights.items()}
     set_peft_model_state_dict(model, tgt_weights, adapter_name=tgt_name)
 
 def generate_model_outputs(
@@ -97,11 +97,14 @@ def generate_model_outputs(
 
     # Pad to batch
     pad_id = tokenizer.pad_token_id or 0
-    prompt_input_ids = torch.nn.utils.rnn.pad_sequence(prompt_ids_list, batch_first=True, padding_value=pad_id)
-    generated_input_ids = torch.nn.utils.rnn.pad_sequence(gen_ids_list, batch_first=True, padding_value=pad_id)
+    max_prompt_len = max(t.size(1) for t in prompt_ids_list)
+    max_gen_len = max(t.size(1) for t in gen_ids_list)
+    
+    prompt_input_ids = torch.stack([F.pad(t, (0, max_prompt_len - t.size(1)), value=pad_id) for t in prompt_ids_list], dim=0)
+    generated_input_ids = torch.stack([F.pad(t, (0, max_gen_len - t.size(1)), value=pad_id) for t in gen_ids_list], dim=0)
 
-    max_gen_len = max(t.size(1) for t in scores_list)
-    scores_view = torch.stack([F.pad(t, (0, max_gen_len - t.size(1)), value=0.0) for t in scores_list], dim=0)
-    logits_view = torch.stack([F.pad(t, (0, 0, 0, max_gen_len - t.size(1)), value=0.0) for t in logits_list], dim=0)
+    max_score_len = max(t.size(1) for t in scores_list)
+    scores_view = torch.stack([F.pad(t, (0, max_score_len - t.size(1)), value=0.0) for t in scores_list], dim=0)
+    logits_view = torch.stack([F.pad(t, (0, 0, 0, max_score_len - t.size(1)), value=0.0) for t in logits_list], dim=0)
 
     return prompt_input_ids, generated_input_ids, scores_view, logits_view

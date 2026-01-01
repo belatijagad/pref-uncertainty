@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import cast
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 import hydra
 from omegaconf import OmegaConf
