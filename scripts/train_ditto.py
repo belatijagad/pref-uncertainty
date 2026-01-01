@@ -42,87 +42,35 @@ logger = logging.getLogger(__name__)
 logging.getLogger("transformers.pipelines").setLevel(logging.WARNING)
 
 
-def standardize_messages(data, default_role):
-    """Normalize prompt/response fields into a list[dict(role, content)]."""
-    if data is None:
-        return []
-    if isinstance(data, list) and data and isinstance(data[0], dict):
-        return data
-    if isinstance(data, str):
-        data = data.strip()
-        if data.startswith("[") or data.startswith("{"):
-            try:
-                loaded = json.loads(data)
-                if isinstance(loaded, list):
-                    return loaded
-                if isinstance(loaded, dict):
-                    return [loaded]
-            except json.JSONDecodeError:
-                pass
-        return [{"role": default_role, "content": data}]
-    if isinstance(data, list) and data and isinstance(data[0], str):
-        return [{"role": default_role, "content": "\n".join(data)}]
-    return []
-
-
-def resolve_history(prompt_msgs, response_msgs):
-    """Merge prompt and response while avoiding duplicated roles at the boundary."""
-    if not response_msgs:
-        return prompt_msgs if prompt_msgs else []
-    if response_msgs[0]["role"] in ["user", "system"]:
-        return response_msgs
-    if prompt_msgs and response_msgs[0]["role"] == prompt_msgs[-1]["role"]:
-        return response_msgs
-    return prompt_msgs + response_msgs
-
-def format_sft(example, tokenizer):
-    """Format a single example for SFT (returns 'text')."""
-    prompt_list = standardize_messages(example["prompt"], default_role="user")
-    chosen_list = standardize_messages(example["chosen"], default_role="assistant")
-
-    full_conversation = resolve_history(prompt_list, chosen_list) or (prompt_list + chosen_list)
-
-    return {
-        "text": tokenizer.apply_chat_template(full_conversation, tokenize=False)
-    }
-
-def format_dpo_smart(example, tokenizer):
-    """Format a single example for DPO/DITTO with explicit BOS handling."""
-
-    prompt_list = standardize_messages(example["prompt"], default_role="user")
-    chosen_list = standardize_messages(example["chosen"], default_role="assistant")
-    rejected_list = standardize_messages(example.get("rejected"), default_role="assistant")
-
-    final_chosen = resolve_history(prompt_list, chosen_list) or (prompt_list + chosen_list)
-
-    prompt_str = tokenizer.apply_chat_template(
-        prompt_list, tokenize=False, add_generation_prompt=True
+def format_for_training(prompt, chosen, tokenizer, mode="sft"):
+    prompt_msgs = [{"role": "user", "content": prompt}]
+    chosen_msgs = [{"role": "assistant", "content": chosen}]
+    full_conversation = prompt_msgs + chosen_msgs
+    
+    # SFT formatting
+    if mode == "sft":
+        text = tokenizer.apply_chat_template(full_conversation, tokenize=False)
+        return {"text": text}
+    
+    # DPO formatting
+    prompt_text = tokenizer.apply_chat_template(
+        prompt_msgs, tokenize=False, add_generation_prompt=True
     )
-    chosen_str = tokenizer.apply_chat_template(final_chosen, tokenize=False)
-
-    rejected_str = ""
-    if rejected_list:
-        final_rejected = resolve_history(prompt_list, rejected_list)
-        if final_rejected:
-            rejected_str = tokenizer.apply_chat_template(final_rejected, tokenize=False)
-
-    def enforce_clean_bos(text: str) -> str:
+    chosen_text = tokenizer.apply_chat_template(
+        full_conversation, tokenize=False
+    )
+    
+    def add_bos(text: str) -> str:
         if not text:
             return text
-        text = text.replace("<s>", "").replace("</s>", "")
-        text = text.lstrip()
+        text = text.replace("<s>", "").replace("</s>", "").lstrip()
         return tokenizer.bos_token + text
-
-    clean_prompt = enforce_clean_bos(prompt_str)
-    clean_chosen = enforce_clean_bos(chosen_str)
-    clean_rejected = enforce_clean_bos(rejected_str) if rejected_str else ""
-
+    
     return {
-        "prompt": clean_prompt,
-        "chosen": clean_chosen,
-        "rejected": clean_rejected,
+        "prompt": add_bos(prompt_text),
+        "chosen": add_bos(chosen_text),
+        "rejected": "",
     }
-
 
 def load_author_subset(config):
     """Load and trim the dataset to the configured author/sample count."""
@@ -137,17 +85,17 @@ def load_author_subset(config):
 
 
 def build_sft_dataset(raw_dataset, tokenizer):
+    """Build SFT dataset by formatting prompt + chosen with chat template."""
     return raw_dataset.map(
-        format_sft,
-        fn_kwargs={"tokenizer": tokenizer},
+        lambda x: format_for_training(x["prompt"], x["chosen"], tokenizer, mode="sft"),
         remove_columns=raw_dataset.column_names,
     )
 
 
 def build_dpo_dataset(raw_dataset, tokenizer):
+    """Build DPO dataset by formatting prompt and chosen separately."""
     return raw_dataset.map(
-        format_dpo_smart,
-        fn_kwargs={"tokenizer": tokenizer},
+        lambda x: format_for_training(x["prompt"], x["chosen"], tokenizer, mode="dpo"),
     )
         
 @hydra.main(version_base=None, config_path="../configs", config_name="ditto")
