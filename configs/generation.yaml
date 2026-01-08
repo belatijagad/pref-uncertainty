@@ -19,6 +19,7 @@ dataset:
   name: ccat50
   name_or_path: belati/ccat50
   author_id: 0
+  eval_split: "val"
   
   num_train_samples: 7
   num_eval_samples: 3
