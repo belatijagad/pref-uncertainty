@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import cast
 
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import hydra
 from omegaconf import OmegaConf
@@ -89,9 +89,15 @@ def main(config: DictConfig):
     model = get_peft_model(model, lora_config, adapter_name="ref_model")
     model.set_adapter("ref_model")
     tokenizer = AutoTokenizer.from_pretrained(config.model["name_or_path"])
+    
+    # Add a dedicated padding token if not present
     if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        model.config.pad_token_id = tokenizer.pad_token_id
+        tokenizer.add_special_tokens({'pad_token': '<pad>'})
+        model.resize_token_embeddings(len(tokenizer))
+        logger.info(f"Added new pad token '<pad>' (id: {tokenizer.pad_token_id})")
+    
+    # Ensure model config is updated
+    model.config.pad_token_id = tokenizer.pad_token_id
 
     # 1. Load Raw Data
     raw_dataset = load_author_subset(config)
@@ -126,7 +132,6 @@ def main(config: DictConfig):
         callbacks=[EarlyStoppingCallback(threshold=1.0)],
     )
     trainer.train()
-
     del trainer
     gc.collect()
     torch.cuda.empty_cache()
@@ -147,13 +152,13 @@ def main(config: DictConfig):
                 logger.info(f"=>> Method {name} already exists in {full_repo_id}; skipping...")
                 continue
         
-        # Clone SFT weights to new Adapter
+        model.set_adapter("ref_model")
         clone_adapter(cast(PeftModel, model), "ref_model", adapter_name)
+        
         model.set_adapter(adapter_name)
-
+        
         # Log generations, uncertainty score
-        tracker = Tracker()
-
+        tracker = Tracker(run_dir=Path("logs") / f"{config.dataset.name}_{config.dataset.author_id}" / f"{name}")
         data_collator = DITTOCollator(
             **config.sampler,
             pad_token_id=tokenizer.pad_token_id,

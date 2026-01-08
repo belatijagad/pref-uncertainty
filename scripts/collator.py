@@ -45,9 +45,6 @@ class DITTOCollator(DataCollatorForPreference):
         if self.pad_token_id is None:
             self.pad_token_id = self.tokenizer.pad_token_id
 
-    def set_mode(self, *, training: bool) -> None:
-        self.mode = "train" if training else "eval"
-
     def resample(
         self,
         step: int,
@@ -61,7 +58,7 @@ class DITTOCollator(DataCollatorForPreference):
         self.sampled_step = step
         self.cache.setdefault(step, {})
 
-        logging = {"generations": {}}
+        logging_dict = {"generations": {}}
 
         # Extract formatted prompts for generation and raw prompts for logging
         formatted_prompts = list(dataset["prompt"])
@@ -95,7 +92,7 @@ class DITTOCollator(DataCollatorForPreference):
                 gen_ids, scores, logits, strict=True
             ):
                 generation_text = tokenizer.decode(gen_id, skip_special_tokens=True)
-                
+                                
                 formatted_response = format_response(
                     prompt=raw_prompt,
                     response=generation_text, 
@@ -113,13 +110,13 @@ class DITTOCollator(DataCollatorForPreference):
                 
                 results.append(generation_text)
 
-            logging["generations"][raw_prompt] = results
+            logging_dict["generations"][raw_prompt] = results
         
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         if self.tracker is not None:
-            self.tracker.add_generations(logging)
+            self.tracker.add_generations(logging_dict)
 
     def _collect_sample_metadata(self, examples: list[dict[str, Any]]) -> tuple:
         """
@@ -308,10 +305,12 @@ class DITTOCollator(DataCollatorForPreference):
             expert_count, replay_count, noisy_count
         ) = self._collect_sample_metadata(examples)
         
+        len_superbatch = self.rescale_batch * len(examples)
+
         # Sample indices
-        n_expert = int(expert_count * self.frac_expert)
-        n_replay = int(replay_count * self.frac_replay)
-        n_noisy = int(noisy_count * self.frac_noisy)
+        n_expert = int(len_superbatch * self.frac_expert)
+        n_replay = int(len_superbatch * self.frac_replay)
+        n_noisy = len_superbatch - n_expert - n_replay
         
         expert_indices = random.sample(range(expert_count), min(expert_count, n_expert)) if expert_count > 0 else []
         replay_indices = random.sample(range(replay_count), min(replay_count, n_replay)) if replay_count > 0 else []
