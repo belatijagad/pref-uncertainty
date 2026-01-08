@@ -80,13 +80,18 @@ class MTE(BaseEstimator):
             logits = logits.squeeze(0)
 
         all_log_probs = F.log_softmax(logits, dim=-1)
-        token_entropies = -torch.sum(torch.exp(all_log_probs) * all_log_probs, dim=-1)
+        probs = torch.exp(all_log_probs)
+        
+        token_entropies = -torch.sum(
+            torch.where(
+                probs > 0,
+                probs * all_log_probs,
+                torch.zeros_like(probs)
+            ),
+            dim=-1
+        )
 
         return token_entropies.mean()
-
-    @property
-    def higher_is_better(self) -> bool:
-        return False
 
 
 ESTIMATOR_MAP = {
