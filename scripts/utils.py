@@ -13,11 +13,7 @@ def format_response(prompt, response, tokenizer, *, add_bos=True):
     response_msgs = [{"role": "assistant", "content": response}]
     full_conversation = prompt_msgs + response_msgs
     
-    formatted_text = tokenizer.apply_chat_template(full_conversation, tokenize=False)
-    
-    if add_bos:
-        formatted_text = formatted_text.replace("<s>", "").replace("</s>", "").lstrip()
-        return tokenizer.bos_token + formatted_text
+    formatted_text = tokenizer.apply_chat_template(full_conversation, tokenize=False, add_generation_prompt=False)
     
     return formatted_text
 
@@ -27,17 +23,15 @@ def format_for_training(prompt, chosen, tokenizer, mode="sft"):
         # SFT: return full conversation as-is from chat template
         return {"text": format_response(prompt, chosen, tokenizer, add_bos=False)}
     
-    # DPO: separate prompt and chosen, both with BOS token
+    # DPO: separate prompt and chosen, let tokenizer handle special tokens
     prompt_msgs = [{"role": "user", "content": prompt}]
     prompt_text = tokenizer.apply_chat_template(
         prompt_msgs, tokenize=False, add_generation_prompt=True
     )
     
-    prompt_text = prompt_text.replace("<s>", "").replace("</s>", "").lstrip()
-    
     return {
-        "prompt": tokenizer.bos_token + prompt_text,
-        "chosen": format_response(prompt, chosen, tokenizer, add_bos=True),
+        "prompt": prompt_text,
+        "chosen": format_response(prompt, chosen, tokenizer, add_bos=False),
         "rejected": "",  # Will be filled during training
     }
 
@@ -62,7 +56,7 @@ def generate_model_outputs(
     tokenizer: PreTrainedTokenizerBase,
     *,
     gen_kwargs: dict[str, Any],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:    
     tokenizer.padding_side = "left"
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
@@ -94,7 +88,7 @@ def generate_model_outputs(
         gen_ids_list.append(gen_ids)
         scores_list.append(trans_scores)
         logits_list.append(logits)
-
+    
     # Pad to batch
     pad_id = tokenizer.pad_token_id or 0
     max_prompt_len = max(t.size(1) for t in prompt_ids_list)

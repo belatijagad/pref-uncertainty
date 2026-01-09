@@ -6,6 +6,8 @@ outputs/
 wandb/
 .vscode/
 uv.lock
+logs/
+tes.ipynb
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -13,7 +13,7 @@ from datasets import Dataset, DatasetDict, IterableDataset, IterableDatasetDict,
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 from huggingface_hub import repo_exists
 
-from scripts.utils import generate_model_outputs, seed_everything
+from scripts.utils import generate_model_outputs, seed_everything, format_response
 from scripts.estimator import ESTIMATOR_MAP
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,7 @@ logging.getLogger("transformers.pipelines").setLevel(logging.WARNING)
 def process_dataset(
     dataset: DatasetDict | Dataset | IterableDatasetDict | IterableDataset,
     dataset_kwargs: dict[str, Any],
+    seed: int,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     
     author_id = dataset_kwargs["author_id"]
@@ -30,32 +31,34 @@ def process_dataset(
     n_eval = dataset_kwargs["num_eval_samples"]
     target_eval_split = dataset_kwargs["eval_split"]
 
-    train_data = dataset["train"]
-    train_rows: list[dict[str, Any]] = [
-        example for example in train_data if example.get("author_id") == author_id
-    ]
+    # Load and filter train data for the specific author
+    train_data = (
+        dataset["train"]
+        .filter(lambda x: x["author_id"] == author_id)
+        .shuffle(seed=seed)
+    )
     
-    assert train_rows, f"No rows found for author {author_id} in 'train' split."
-    random.shuffle(train_rows)
+    assert len(train_data) > 0, f"No rows found for author {author_id} in 'train' split."
     
-    examples = train_rows[:n_train]
+    # Select training examples
+    num_train_samples = min(n_train, len(train_data))
+    examples = train_data.select(range(num_train_samples))
 
-    eval_candidates_rows = []
-            
-    eval_data = dataset[target_eval_split]
-    eval_rows: list[dict[str, Any]] = [
-        example for example in eval_data if example.get("author_id") == author_id
-    ]
+    # Load and filter eval data for the specific author
+    eval_data = (
+        dataset[target_eval_split]
+        .filter(lambda x: x["author_id"] == author_id)
+        .shuffle(seed=seed)
+    )
     
-    assert eval_rows, f"No rows found for author {author_id} in '{target_eval_split}' split."
-    random.shuffle(eval_rows)
-    eval_candidates_rows = eval_rows
+    assert len(eval_data) > 0, f"No rows found for author {author_id} in '{target_eval_split}' split."
+    
+    # Select evaluation examples
+    num_eval_samples = min(n_eval, len(eval_data))
+    final_eval_selection = eval_data.select(range(num_eval_samples))
 
-    final_eval_selection = eval_candidates_rows[:n_eval]
-
-    prompts: list[str] = []
-    for example in final_eval_selection:
-        prompts.append(str(example.get("prompt")))
+    # Extract prompts from eval selection
+    prompts: list[str] = [example["prompt"] for example in final_eval_selection]
 
     return examples, prompts
 
@@ -74,7 +77,7 @@ def generate_results(
     model: PreTrainedModel, 
     tokenizer: PreTrainedTokenizer, 
     prompts: list[str],
-    examples: list[dict[str, Any]],
+    examples: Dataset,
     gen_kwargs: dict[str, Any],
     method_name: str,
     base_dir: str,
@@ -95,8 +98,8 @@ def generate_results(
 
         if method_name == "few-shot":
             for example in examples:
-                messages.append({"role": "user", "content": example.get('prompt')})
-                messages.append({"role": "assistant", "content": example.get('chosen')})
+                messages.append({"role": "user", "content": example["prompt"]})
+                messages.append({"role": "assistant", "content": example["chosen"]})
 
         messages.append({"role": "user", "content": p})
 
@@ -157,7 +160,7 @@ def main(config: DictConfig):
     logger.info(f"Starting generation for model {config.model.name_or_path} on dataset {config.dataset.name_or_path}")
 
     dataset = load_dataset(dataset_config["name_or_path"])
-    examples, prompts = process_dataset(dataset, dataset_config)
+    examples, prompts = process_dataset(dataset, dataset_config, config.seed)
 
     generate_examples(dataset, dataset_config, base_dir=str(output_dir.parent))
 
@@ -171,11 +174,19 @@ def main(config: DictConfig):
     )
     
     tokenizer = AutoTokenizer.from_pretrained(config.model.name_or_path)
+    logger.info(f"Base tokenizer size: {len(tokenizer)}")
     
-    tokenizer.padding_side = "left" 
+    # Resize to match training checkpoint (32064 tokens)
+    target_vocab_size = 32064
+    model.resize_token_embeddings(target_vocab_size)
+    logger.info(f"Resized model embeddings to {target_vocab_size}")
+    
+    # Ensure pad token is set
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         model.config.pad_token_id = tokenizer.pad_token_id
+    
+    tokenizer.padding_side = "left"
 
     logger.info("Generating Zero-shot...")
     generate_results(model, tokenizer, prompts, examples, generation_config, method_name="zero-shot", base_dir=str(output_dir))

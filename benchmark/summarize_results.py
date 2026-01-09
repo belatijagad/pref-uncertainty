@@ -6,46 +6,83 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 import hydra
-from google import genai
 from omegaconf import DictConfig
+
+from google import genai
+import openai
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_PATH = ROOT / "outputs" / "evaluations"
 
-def retrieve_results(job_name: str) -> list[dict[str, Any]]:
-    client = genai.Client()
-    batch_job = client.batches.get(name=job_name)
+def determine_provider(model_name: str) -> str:
+    if "gpt" in model_name:
+        return "openai"
+    return "gemini"
 
-    if batch_job.state.name == 'JOB_STATE_SUCCEEDED':
+def retrieve_results(identifier: str, provider: str = "gemini") -> list[dict[str, Any]]:
+    if provider == "openai":
         
-        if batch_job.dest and batch_job.dest.file_name:
-            result_file_name = batch_job.dest.file_name
+        client = openai.Client()
+        batch_job = client.batches.retrieve(identifier)
 
-            file_content_bytes = client.files.download(file=result_file_name)
-            file_content_str = file_content_bytes.decode('utf-8')
-            
-            json_objects = []
-            
-            for line in file_content_str.splitlines():
-                json_objects.append(json.loads(line))
-            
-            with open(OUTPUT_PATH / "batch_results.json", 'w', encoding='utf-8') as f:
-                json.dump(json_objects, f, indent=4) 
-            
-            return json_objects
-                    
-    else:
-        print(f"Job did not succeed. Final state: {batch_job.state.name}")
-        if batch_job.error:
-            print(f"Error: {batch_job.error}")
-        sys.exit(0)
+        if batch_job.status == 'completed':
+            if batch_job.output_file_id:
+                result_file_id = batch_job.output_file_id
+                file_response = client.files.content(result_file_id)
+                file_content_str = file_response.read().decode('utf-8')
+                
+                json_objects = []
+                for line in file_content_str.splitlines():
+                    json_objects.append(json.loads(line))
+                
+                with open(OUTPUT_PATH / "batch_results.json", 'w', encoding='utf-8') as f:
+                    json.dump(json_objects, f, indent=4) 
+                
+                return json_objects
+        else:
+            print(f"Job did not succeed. Final state: {batch_job.status}")
+            if hasattr(batch_job, 'errors') and batch_job.errors:
+                print(f"Error: {batch_job.errors}")
+            sys.exit(0)
+    else:  # gemini        
+        client = genai.Client()
+        batch_job = client.batches.get(name=identifier)
 
-def process_leaderboard(matches: list[dict[str, Any]]) -> dict[str, dict[str, list[int, int]]]:
+        if batch_job.state.name == 'JOB_STATE_SUCCEEDED':
+            if batch_job.dest and batch_job.dest.file_name:
+                result_file_name = batch_job.dest.file_name
+                file_content_bytes = client.files.download(file=result_file_name)
+                file_content_str = file_content_bytes.decode('utf-8')
+                
+                json_objects = []
+                for line in file_content_str.splitlines():
+                    json_objects.append(json.loads(line))
+                
+                with open(OUTPUT_PATH / "batch_results.json", 'w', encoding='utf-8') as f:
+                    json.dump(json_objects, f, indent=4) 
+                
+                return json_objects
+        else:
+            print(f"Job did not succeed. Final state: {batch_job.state.name}")
+            if batch_job.error:
+                print(f"Error: {batch_job.error}")
+            sys.exit(0)
+
+def process_leaderboard(matches: list[dict[str, Any]], provider: str = "gemini") -> dict[str, dict[str, list[int, int]]]:
     categories = {}
 
     for match in matches:
-        key = match["key"]
-        data_authid, matchup = key.split("__")
+        if provider == "openai":
+            custom_id = match["custom_id"]
+            parts = custom_id.split("__")
+            data_authid = parts[0]
+            matchup = parts[1]
+            winner = json.loads(match["response"]["body"]["choices"][0]["message"]["content"])["answer"]
+        else:  # gemini
+            key = match["key"]
+            data_authid, matchup = key.split("__")
+            winner = json.loads(match["response"]["candidates"][0]["content"]["parts"][0]["text"])["answer"]
+        
         if data_authid not in categories.keys():
             categories[data_authid] = {}
 
@@ -56,8 +93,6 @@ def process_leaderboard(matches: list[dict[str, Any]]) -> dict[str, dict[str, li
 
         if model_b not in categories[data_authid].keys():
             categories[data_authid][model_b] = [0, 0]
-
-        winner = json.loads(match["response"]["candidates"][0]["content"]["parts"][0]["text"])["answer"]
 
         categories[data_authid][model_a][winner != "A"] += 1
         categories[data_authid][model_b][winner == "A"] += 1
@@ -80,12 +115,21 @@ def calculate_winrate(statistics: dict[str, dict[str, list[int, int]]]) -> dict[
 @hydra.main(version_base=None, config_path="../configs", config_name="conclude")
 def main(config: DictConfig):
     load_dotenv()
-    os.environ["api_key"] = os.environ.get("GEMINI_API_KEY")
-
-    assert config.job_name, "Job name can't be null; insert arg job_name=<job_name> when running the script."
-
-    matches = retrieve_results(config.job_name)
-    statistics = process_leaderboard(matches)
+    
+    provider = config.get("provider", "gemini").lower()
+    
+    if provider == "openai":
+        os.environ["api_key"] = os.environ.get("OPENAI_API_KEY")
+        identifier_key = "batch_id"
+        assert config.get(identifier_key), f"{identifier_key} can't be null; insert arg {identifier_key}=<{identifier_key}> when running the script."
+    else:
+        os.environ["api_key"] = os.environ.get("GEMINI_API_KEY")
+        identifier_key = "job_name"
+        assert config.get(identifier_key), f"{identifier_key} can't be null; insert arg {identifier_key}=<{identifier_key}> when running the script."
+    
+    identifier = config.get(identifier_key)
+    matches = retrieve_results(identifier, provider)
+    statistics = process_leaderboard(matches, provider)
     calculate_winrate(statistics)
 
 

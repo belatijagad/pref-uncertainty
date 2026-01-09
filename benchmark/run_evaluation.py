@@ -11,9 +11,20 @@ from itertools import permutations
 from pydantic import BaseModel, Field
 
 import hydra
-from google import genai
-from google.genai import types
 from omegaconf import DictConfig, OmegaConf
+
+try:
+    from google import genai
+    from google.genai import types
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +37,7 @@ class JudgeResult(BaseModel):
     answer: Literal["A", "B"] = Field(description="The option most similar to the HUMAN AUTHOR'S WRITING; either A or B")
     reasoning: str = Field(description="Brief explanation of why this option is more similar")
 
-PROMPT_TEMPLATE = textwrap.dedent(
+PROMPT_TEMPLATE_GEMINI = textwrap.dedent(
     """You are an impartial evaluator.
     Below is a sample of a human author"s writing and two options.
 
@@ -41,6 +52,29 @@ PROMPT_TEMPLATE = textwrap.dedent(
 
     ### Task
     Which option was written by the human author based on similarity to the HUMAN AUTHOR"S WRITING above?
+
+    ALWAYS REMAIN IMPARTIAL WHEN EVALUATING OUTPUTS.
+    """
+)
+
+PROMPT_TEMPLATE_OPENAI = textwrap.dedent(
+    """You are an impartial evaluator.
+    Below is a sample of a human author"s writing and two options.
+
+    ### HUMAN AUTHOR"S WRITING:
+    {demo}
+
+    ### OUTPUT A:
+    {text_a}
+
+    ### OUTPUT B:
+    {text_b}
+
+    ### Task
+    Which option was written by the human author based on similarity to the HUMAN AUTHOR"S WRITING above? Respond only with a JSON of the following format:
+    {{
+        "answer": "<The option most similar to the HUMAN AUTHOR'S WRITING; either A or B>"
+    }}
 
     ALWAYS REMAIN IMPARTIAL WHEN EVALUATING OUTPUTS.
     """
@@ -120,6 +154,8 @@ def aggregate_responses() -> dict[str, Any]:
 
 def create_jsonl(data: dict[str, Any], config) -> None:
     requests = []
+    provider = config.get("provider", "gemini").lower()
+    prompt_template = PROMPT_TEMPLATE_OPENAI if provider == "openai" else PROMPT_TEMPLATE_GEMINI
 
     for data_aid, content in data.items():
         prompts_list = content["prompt"]
@@ -133,30 +169,45 @@ def create_jsonl(data: dict[str, Any], config) -> None:
             completions_a = generations_dict[model_name_a]
             completions_b = generations_dict[model_name_b]
 
-            for p_text, d_text, resp_a, resp_b in zip(prompts_list, demos_list, completions_a, completions_b, strict=True):
+            for i, (p_text, d_text, resp_a, resp_b) in enumerate(zip(prompts_list, demos_list, completions_a, completions_b, strict=True)):
                 
                 context_input = f"{p_text}\n{d_text}"
                 option_a = f"{p_text}\n{resp_a}"
                 option_b = f"{p_text}\n{resp_b}"
 
-                requests.append({
-                    "key": f"{data_aid}__{model_name_a}_VS_{model_name_b}", # ccat50_0__Ministral-8B-Instruct-2410_msp_ditto_VS_Ministral-8B-Instruct-2410_None_ditto
-                    "request": {
-                        "contents": [
-                            {
-                                "parts": [
-                                    {
-                                        "text": PROMPT_TEMPLATE.format(demo=context_input, text_a=option_a, text_b=option_b)
-                                    }
-                                ]
-                            }
-                        ],
-                        "generationConfig": {
-                            "response_mime_type": "application/json",
-                            "response_json_schema": JudgeResult.model_json_schema(),
+                if provider == "openai":
+                    unique_id = f"{data_aid}__{model_name_a}_VS_{model_name_b}__i-{i}"
+                    requests.append({
+                        "custom_id": unique_id,
+                        "method": "POST",
+                        "url": "/v1/chat/completions",
+                        "body": {
+                            "model": config.model_name,
+                            "messages": [
+                                {"role": "system", "content": "You are a helpful assistant."},
+                                {"role": "user", "content": prompt_template.format(demo=context_input, text_a=option_a, text_b=option_b)},
+                            ]
                         },
-                    }
-                })
+                    })
+                else:  # gemini
+                    requests.append({
+                        "key": f"{data_aid}__{model_name_a}_VS_{model_name_b}",
+                        "request": {
+                            "contents": [
+                                {
+                                    "parts": [
+                                        {
+                                            "text": prompt_template.format(demo=context_input, text_a=option_a, text_b=option_b)
+                                        }
+                                    ]
+                                }
+                            ],
+                            "generationConfig": {
+                                "response_mime_type": "application/json",
+                                "response_json_schema": JudgeResult.model_json_schema(),
+                            },
+                        }
+                    })
 
     comparison_output = OUTPUT_PATH / "batch-request.jsonl"
     comparison_output.parent.mkdir(parents=True, exist_ok=True)
@@ -165,25 +216,47 @@ def create_jsonl(data: dict[str, Any], config) -> None:
         for req in requests:
             f.write(json.dumps(req) + "\n")
 
-    logger.info("Finished created jsonl file.")
+    logger.info(f"Finished creating jsonl file with {len(requests)} requests.")
 
 def create_batch_request(config) -> None:
-    client = genai.Client()
-
-    uploaded_file = client.files.upload(
-        file=OUTPUT_PATH / "batch-request.jsonl",
-        config=types.UploadFileConfig(display_name="eval", mime_type="jsonl")
-    )
-
-    file_batch_job = client.batches.create(
-        model=config.model_name,
-        src=uploaded_file.name,
-        config={
-            "display_name": config.batch_display_name,
-        },
-    )
-
-    logger.info(f"=>> Created batch job: {file_batch_job.name}")
+    provider = config.get("provider", "gemini").lower()
+    
+    if provider == "openai":
+        if not OPENAI_AVAILABLE:
+            raise ImportError("OpenAI library not available. Install with: pip install openai")
+        
+        client = openai.Client()
+        uploaded_file = client.files.create(
+            file=open(OUTPUT_PATH / "batch-request.jsonl", "rb"),
+            purpose="batch",
+        )
+        
+        file_batch_job = client.batches.create(
+            input_file_id=uploaded_file.id,
+            endpoint="/v1/chat/completions",
+            completion_window="24h"
+        )
+        
+        logger.info(f"=>> Created batch job: {file_batch_job.id}")
+    else:  # gemini
+        if not GEMINI_AVAILABLE:
+            raise ImportError("Google GenAI library not available. Install with: pip install google-genai")
+        
+        client = genai.Client()
+        uploaded_file = client.files.upload(
+            file=OUTPUT_PATH / "batch-request.jsonl",
+            config=types.UploadFileConfig(display_name="eval", mime_type="jsonl")
+        )
+        
+        file_batch_job = client.batches.create(
+            model=config.model_name,
+            src=uploaded_file.name,
+            config={
+                "display_name": config.batch_display_name,
+            },
+        )
+        
+        logger.info(f"=>> Created batch job: {file_batch_job.name}")
 
 
 
@@ -191,7 +264,16 @@ def create_batch_request(config) -> None:
 def main(config: DictConfig):
     OmegaConf.resolve(config)
     load_dotenv()
-    os.environ["api_key"] = os.environ.get("GEMINI_API_KEY")
+    
+    provider = config.get("provider", "gemini").lower()
+    
+    if provider == "openai":
+        os.environ["api_key"] = os.environ.get("OPENAI_API_KEY")
+        logger.info("=>> Using OpenAI provider")
+    else:
+        os.environ["api_key"] = os.environ.get("GEMINI_API_KEY")
+        logger.info("=>> Using Gemini provider")
+    
     logger.info("=>> Starting the evaluation process...")
     logger.info(f"Model for evaluation: {config.model_name}")
     data = aggregate_responses()
