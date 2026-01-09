@@ -25,8 +25,7 @@ class Tracker:
         self.samples.append(samples)
 
     def add_metrics(self, metrics: dict[str, any]):
-        if self.internal_step < len(self.samples):
-            self.samples[self.internal_step]["metrics"] = metrics
+        self.samples[self.internal_step]["metrics"] = metrics
         
         self.internal_step += 1
 

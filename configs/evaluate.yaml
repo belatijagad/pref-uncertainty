@@ -2,5 +2,6 @@ hydra:
   run:
     dir: outputs/evaluations
 
-model_name: gpt-4-0613
+provider: openai
+model_name: gpt-5.2-2025-12-11
 batch_display_name: evaluate
