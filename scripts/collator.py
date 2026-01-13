@@ -46,15 +46,18 @@ class DITTOCollator(DataCollatorForPreference):
     estimator: BaseEstimator = None
 
     # dict[timestep: int, dict[ prompt: str, list[ outputs: dict[str, torch.tensor] ] ] ]
-    cache: dict[int, dict[str, list[ dict[str, torch.Tensor] ]]] = field(default_factory=dict)
+    cache: dict[int, dict[str, list[dict[str, torch.Tensor]]]] = field(default_factory=dict)
     sampled_step: int = field(default=0, init=False)
 
     def __post_init__(self):
         if self.tokenizer is None:
             raise ValueError("Tokenizer must be provided to `DITTOCollator`.")
-        
         if self.pad_token_id is None:
             self.pad_token_id = self.tokenizer.pad_token_id
+
+    def _get_cache_entries(self, step: int, prompt: str) -> list[dict]:
+        """Helper to safely get cache entries for a given step and prompt."""
+        return self.cache.get(step, {}).get(prompt, [])
 
     def resample(
         self,
@@ -156,60 +159,50 @@ class DITTOCollator(DataCollatorForPreference):
         """
         expert_meta = []  # (example_idx, rejected_idx)
         replay_meta = []  # (example_idx, step, rejected_idx)
-        noisy_meta  = []  # (prompt, step_a, step_b, curr_idx, past_idx, curr_score, past_score)
+        noisy_meta = []   # (prompt, step_a, step_b, curr_idx, past_idx, curr_score, past_score)
         
         for ex_idx, example in enumerate(examples):
             prompt_text = example["prompt"]
             
-            current_step_data = self.cache.get(self.sampled_step, {}).get(prompt_text, [])
-            
             # Collect expert samples (current step)
-            for rej_idx in range(len(current_step_data)):
-                expert_meta.append((ex_idx, rej_idx))
+            current_step_data = self._get_cache_entries(self.sampled_step, prompt_text)
+            expert_meta.extend((ex_idx, rej_idx) for rej_idx in range(len(current_step_data)))
             
             # Collect replay samples (previous steps)
-            for step_a in self.cache.keys():
-                if step_a < self.sampled_step:
-                    past_data = self.cache[step_a].get(prompt_text, [])
-                    for rej_idx in range(len(past_data)):
-                        replay_meta.append((ex_idx, step_a, rej_idx))
+            for step in self.cache:
+                if step < self.sampled_step:
+                    past_data = self._get_cache_entries(step, prompt_text)
+                    replay_meta.extend((ex_idx, step, rej_idx) for rej_idx in range(len(past_data)))
             
             # Collect noisy samples
-            for step_a in self.cache.keys():
-                step_data = self.cache.get(step_a, {})
-                if prompt_text not in step_data:
+            for step_a, step_data in self.cache.items():
+                if not (current_entries := step_data.get(prompt_text)):
                     continue
                 
-                current_entries = self.cache[step_a][prompt_text]
-                
                 for step_b in range(step_a):
-                    past_entries = self.cache.get(step_b, {}).get(prompt_text)
-                    if not past_entries:
+                    if not (past_entries := self._get_cache_entries(step_b, prompt_text)):
                         continue
                     
                     for curr_idx, current in enumerate(current_entries):
+                        curr_score = float(current["score"])
                         for past_idx, past in enumerate(past_entries):
-                            curr_score = float(current["score"])
                             past_score = float(past["score"])
-                            
-                            # Rejection sampling
-                            margin = abs(curr_score - past_score)
-                            if margin < self.rejection_thresh:
-                                continue
-                            
-                            noisy_meta.append((
-                                prompt_text, step_a, step_b, 
-                                curr_idx, past_idx, 
-                                curr_score, past_score
-                            ))
+                            if abs(curr_score - past_score) >= self.rejection_thresh:
+                                noisy_meta.append((
+                                    prompt_text, step_a, step_b,
+                                    curr_idx, past_idx,
+                                    curr_score, past_score
+                                ))
         
-        return (
-            expert_meta, replay_meta, noisy_meta,
-            len(expert_meta), len(replay_meta), len(noisy_meta)
-        )
+        return (expert_meta, replay_meta, noisy_meta, len(expert_meta), len(replay_meta), len(noisy_meta))
+
+    @staticmethod
+    def _get_full_ids(entry: dict) -> list:
+        """Concatenate prompt and generated input IDs from a cache entry."""
+        return entry["prompt_input_ids"] + entry["generated_input_ids"]
 
     def _generate_samples_from_indices(
-        self, 
+        self,
         examples: list[dict[str, Any]],
         expert_meta: list,
         replay_meta: list,
@@ -218,184 +211,137 @@ class DITTOCollator(DataCollatorForPreference):
         replay_indices: list[int],
         noisy_indices: list[int],
     ) -> tuple[list[tuple], list[tuple]]:
-        
         samples = []
-        
-        def get_full_rejected(rej_entry):
-            return rej_entry["prompt_input_ids"] + rej_entry["generated_input_ids"]
+        noisy_samples_for_tracking = []
 
         # Generate expert samples
         for idx in expert_indices:
             ex_idx, rej_idx = expert_meta[idx]
             example = examples[ex_idx]
-            current_step_data = self.cache[self.sampled_step][example["prompt"]]
-            rejected = current_step_data[rej_idx]
-            
+            rejected = self.cache[self.sampled_step][example["prompt"]][rej_idx]
             samples.append((
                 example["prompt_input_ids"],
                 example["chosen_input_ids"],
-                get_full_rejected(rejected),
+                self._get_full_ids(rejected),
             ))
-        
+
         # Generate replay samples
         for idx in replay_indices:
             ex_idx, step_a, rej_idx = replay_meta[idx]
             example = examples[ex_idx]
-            past_data = self.cache[step_a][example["prompt"]]
-            rejected = past_data[rej_idx]
-            
+            rejected = self.cache[step_a][example["prompt"]][rej_idx]
             samples.append((
                 example["prompt_input_ids"],
                 example["chosen_input_ids"],
-                get_full_rejected(rejected),
+                self._get_full_ids(rejected),
             ))
-        
+
         # Generate noisy samples
-        noisy_samples_for_tracking = []
         for idx in noisy_indices:
             prompt_text, step_a, step_b, curr_idx, past_idx, curr_score, past_score = noisy_meta[idx]
-            
             current = self.cache[step_a][prompt_text][curr_idx]
             past = self.cache[step_b][prompt_text][past_idx]
-            
-            past_is_better = (
-                (past_score > curr_score) 
-                if self.higher_is_better 
-                else (past_score < curr_score)
-            )
-            chosen = past if past_is_better else current
-            rejected = current if past_is_better else past
-            
-            # For noisy, BOTH come from cache, so construct both
+
+            past_is_better = (past_score > curr_score) if self.higher_is_better else (past_score < curr_score)
+            chosen, rejected = (past, current) if past_is_better else (current, past)
+
             samples.append((
                 current["prompt_input_ids"],
-                get_full_rejected(chosen),
-                get_full_rejected(rejected),
+                self._get_full_ids(chosen),
+                self._get_full_ids(rejected),
             ))
-            
             noisy_samples_for_tracking.append((
                 chosen["generated_input_ids"],
                 rejected["generated_input_ids"],
                 float(chosen["score"]),
-                float(rejected["score"])
+                float(rejected["score"]),
             ))
-        
+
         return samples, noisy_samples_for_tracking
 
     def _build_batch(self, samples: list[tuple]) -> dict[str, torch.Tensor]:
-        def attn_mask(input_ids: list[torch.Tensor]) -> list[torch.Tensor]:
-            return [torch.ones_like(input_id) for input_id in input_ids]
-        
-        # samples[i] = (prompt_ids, chosen_ids, rejected_ids)
-        
+        """Build padded batch tensors from samples. samples[i] = (prompt_ids, chosen_ids, rejected_ids)"""
         raw_tensors = {"prompt_input_ids": [], "chosen_input_ids": [], "rejected_input_ids": []}
         raw_labels = {"chosen_labels": [], "rejected_labels": []}
 
         for p_ids, c_ids, r_ids in samples:
-            # Convert to tensors
             p_tensor = torch.tensor(p_ids, dtype=torch.long)
             c_tensor = torch.tensor(c_ids, dtype=torch.long)
             r_tensor = torch.tensor(r_ids, dtype=torch.long)
-            
+
             raw_tensors["prompt_input_ids"].append(p_tensor)
             raw_tensors["chosen_input_ids"].append(c_tensor)
             raw_tensors["rejected_input_ids"].append(r_tensor)
 
             prompt_len = len(p_ids)
-            
-            c_label = c_tensor.clone()
-            c_label[:prompt_len] = -100
-            raw_labels["chosen_labels"].append(c_label)
-            
-            r_label = r_tensor.clone()
-            r_label[:prompt_len] = -100
-            raw_labels["rejected_labels"].append(r_label)
+            for tensor, label_key in [(c_tensor, "chosen_labels"), (r_tensor, "rejected_labels")]:
+                label = tensor.clone()
+                label[:prompt_len] = -100
+                raw_labels[label_key].append(label)
 
         batch = {}
-        
         for name, ids_list in raw_tensors.items():
             padding_side = "left" if "prompt" in name else "right"
-            
-            batch[name] = pad(
-                ids_list, 
-                padding_value=self.tokenizer.pad_token_id, 
-                padding_side=padding_side
-            )
-            
+            batch[name] = pad(ids_list, padding_value=self.tokenizer.pad_token_id, padding_side=padding_side)
             mask_name = f"{name.split('_')[0]}_attention_mask"
             batch[mask_name] = pad(
-                attn_mask(ids_list), 
-                padding_value=0, 
-                padding_side=padding_side
+                [torch.ones_like(t) for t in ids_list],
+                padding_value=0,
+                padding_side=padding_side,
             )
 
         for name, labels_list in raw_labels.items():
-             batch[name] = pad(
-                labels_list,
-                padding_value=-100,
-                padding_side="right" 
-            )
-        
+            batch[name] = pad(labels_list, padding_value=-100, padding_side="right")
+
         return batch
+
+    def _sample_indices(self, count: int, n_samples: int) -> list[int]:
+        """Sample indices from range, handling empty case."""
+        return random.sample(range(count), min(count, n_samples)) if count > 0 else []
 
     def torch_call(self, examples: list[dict[str, Any]]) -> dict[str, Any]:
         """
         Main collator function that creates preference pairs for DPO training.
         Uses lazy evaluation to avoid OOM on large cache sizes.
         """
-        (
-            expert_meta, replay_meta, noisy_meta,
-            expert_count, replay_count, noisy_count
-        ) = self._collect_sample_metadata(examples)
-        
-        len_superbatch = self.rescale_batch * len(examples)
+        expert_meta, replay_meta, noisy_meta, expert_count, replay_count, noisy_count = \
+            self._collect_sample_metadata(examples)
 
-        # Sample indices
+        len_superbatch = self.rescale_batch * len(examples)
         n_expert = int(len_superbatch * self.frac_expert)
         n_replay = int(len_superbatch * self.frac_replay)
         n_noisy = len_superbatch - n_expert - n_replay
-        
-        expert_indices = random.sample(range(expert_count), min(expert_count, n_expert)) if expert_count > 0 else []
-        replay_indices = random.sample(range(replay_count), min(replay_count, n_replay)) if replay_count > 0 else []
-        noisy_indices = random.sample(range(noisy_count), min(noisy_count, n_noisy)) if noisy_count > 0 else []
-        
-        # Lazy generate sample pairs
+
         samples, noisy_samples_for_tracking = self._generate_samples_from_indices(
             examples, expert_meta, replay_meta, noisy_meta,
-            expert_indices, replay_indices, noisy_indices
+            self._sample_indices(expert_count, n_expert),
+            self._sample_indices(replay_count, n_replay),
+            self._sample_indices(noisy_count, n_noisy),
         )
-        
+
         # Track noisy samples
-        if self.tracker is not None and noisy_samples_for_tracking:
-            tracker_logging = {
+        if self.tracker and noisy_samples_for_tracking:
+            self.tracker.add_collator_sampling({
                 "sampled_data": [
-                    (self.tokenizer.decode(chosen), self.tokenizer.decode(rejected))
-                    for chosen, rejected, _, _
-                    in noisy_samples_for_tracking
+                    (self.tokenizer.decode(c), self.tokenizer.decode(r))
+                    for c, r, _, _ in noisy_samples_for_tracking
                 ],
                 "uncertainty": [
-                    (chosen_score, rejected_score) 
-                    for _, _, chosen_score, rejected_score 
-                    in noisy_samples_for_tracking
+                    (cs, rs) for _, _, cs, rs in noisy_samples_for_tracking
                 ],
                 "margin": [
-                    abs(chosen_score - rejected_score)
-                    for _, _, chosen_score, rejected_score 
-                    in noisy_samples_for_tracking
+                    abs(cs - rs) for _, _, cs, rs in noisy_samples_for_tracking
                 ],
-            }
-            self.tracker.add_collator_sampling(tracker_logging)
-        
+            })
+
         if not samples and expert_count > 0:
             ex_idx, rej_idx = expert_meta[0]
             example = examples[ex_idx]
-            current_step_data = self.cache[self.sampled_step][example["prompt"]]
-            rejected = current_step_data[rej_idx]
-            
+            rejected = self.cache[self.sampled_step][example["prompt"]][rej_idx]
             samples = [(
                 example["prompt_input_ids"],
                 example["chosen_input_ids"],
                 rejected["generated_input_ids"],
             )]
-        
+
         return self._build_batch(samples)
