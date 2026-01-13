@@ -1,6 +1,7 @@
 # DITTO Authors: Omar Shaikh, Michelle S. Lam, Joey Hejna, Yijia Shao, Hyundong Cho, Michael S. Bernstein, Diyi Yang
 # Copyright 2020-2025 The HuggingFace Team. All rights reserved.
 
+import gc
 import random
 from typing import Any
 from dataclasses import dataclass, field
@@ -14,6 +15,16 @@ from trl.trainer.utils import pad
 from scripts.utils import generate_model_outputs, format_response
 from scripts.estimator import BaseEstimator
 from scripts.tracker import Tracker
+
+def check_gpu_memory(label=""):
+    if not torch.cuda.is_available():
+        return
+    device = torch.device('cuda:0')
+    
+    free, total = torch.cuda.mem_get_info(device)
+    mem_used_MB = (total - free) / 1024 ** 2
+    print(f"[{label}] Memory Used: {mem_used_MB:.2f} MB")
+    return mem_used_MB
 
 @dataclass
 class DITTOCollator(DataCollatorForPreference):
@@ -52,47 +63,61 @@ class DITTOCollator(DataCollatorForPreference):
         tokenizer: PreTrainedTokenizerBase,
         dataset: Dataset | IterableDataset,
     ) -> None:
-        """
-        Generates new responses from the model and updates the cache.
-        """
+        # [MEMORY CHECK 1] Start
+        check_gpu_memory("Resample: Start")
+
         self.sampled_step = step
         self.cache.setdefault(step, {})
 
         logging_dict = {"generations": {}}
-
-        # Extract formatted prompts for generation and raw prompts for logging
         formatted_prompts = list(dataset["prompt"])
         raw_prompts = list(dataset["raw_prompt"]) if "raw_prompt" in dataset.column_names else formatted_prompts
         
-        (
-            prompt_input_ids, 
-            generated_input_ids, 
-            scores_view, 
-            logits_view
-        ) = generate_model_outputs(
+        # 1. Generate 
+        generation_results = generate_model_outputs(
             prompts=formatted_prompts,
             model=model,
             tokenizer=tokenizer,
             gen_kwargs=self.gen_kwargs,
         )
 
-        for formatted_prompt, raw_prompt, pr_ids, gen_ids, scores, logits in zip(
-            formatted_prompts,
-            raw_prompts,
-            prompt_input_ids, generated_input_ids,
-            scores_view, logits_view, strict=True
-        ):
-            # Use formatted prompt as cache key (maintains consistency with training)
-            cache_slot = self.cache[step].setdefault(formatted_prompt, [])
-            pr_id = pr_ids[0]
-            results = []
+        # [MEMORY CHECK 2] Peak
+        check_gpu_memory("Resample: After Gen (Peak)")
+
+        for i, (formatted_prompt, raw_prompt) in enumerate(zip(formatted_prompts, raw_prompts)):
             
-            # For each generated sequence for the same prompt
-            for gen_id, score, logit in zip(
-                gen_ids, scores, logits, strict=True
-            ):
-                generation_text = tokenizer.decode(gen_id, skip_special_tokens=True)
-                                
+            pr_ids_batch, gen_ids_batch, scores_batch, logits_batch = generation_results[i]
+            
+            cache_slot = self.cache[step].setdefault(formatted_prompt, [])
+            tracker_results_for_prompt = []
+
+            for j in range(len(gen_ids_batch)):
+                
+                single_gen_id = gen_ids_batch[j]
+                single_score = scores_batch[j]
+                single_logit = logits_batch[j]
+
+                # --- Compute Estimator ---
+                estimator_score = self.estimator(
+                    input_ids=single_gen_id, 
+                    logprobs=single_score, 
+                    logits=single_logit
+                )
+                if isinstance(estimator_score, torch.Tensor):
+                    estimator_score = estimator_score.item()
+
+                # --- [CRITICAL FIX] STRIP PADDING TOKENS ---
+                # Convert to list and remove pad_token_id
+                # This ensures we don't train the model to predict <pad>
+                raw_gen_list = single_gen_id.tolist()
+                raw_pr_list = pr_ids_batch[j].tolist()
+                
+                saved_gen_ids = [t for t in raw_gen_list if t != self.pad_token_id]
+                saved_pr_ids = [t for t in raw_pr_list if t != self.pad_token_id]
+
+                # Decode to string (Tokenizer handles padding removal too, but we need clean IDs for training)
+                generation_text = tokenizer.decode(saved_gen_ids, skip_special_tokens=True)
+                
                 formatted_response = format_response(
                     prompt=raw_prompt,
                     response=generation_text, 
@@ -101,22 +126,26 @@ class DITTOCollator(DataCollatorForPreference):
                 
                 cache_slot.append(
                     {
-                        "score": self.estimator(gen_id, score, logit),
-                        "prompt_input_ids": pr_id,
-                        "generated_input_ids": gen_id,
-                        "formatted_response": formatted_response,  # Can be used as chosen or rejected
+                        "score": estimator_score,
+                        "prompt_input_ids": saved_pr_ids,
+                        "generated_input_ids": saved_gen_ids,
+                        "formatted_response": formatted_response,
                     }
                 )
                 
-                results.append(generation_text)
+                tracker_results_for_prompt.append(generation_text)
 
-            logging_dict["generations"][raw_prompt] = results
+            logging_dict["generations"][raw_prompt] = tracker_results_for_prompt
         
+        del generation_results
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         if self.tracker is not None:
             self.tracker.add_generations(logging_dict)
+
+        check_gpu_memory("Resample: End (Cleanup Done)")
 
     def _collect_sample_metadata(self, examples: list[dict[str, Any]]) -> tuple:
         """
@@ -189,14 +218,12 @@ class DITTOCollator(DataCollatorForPreference):
         replay_indices: list[int],
         noisy_indices: list[int],
     ) -> tuple[list[tuple], list[tuple]]:
-        """
-        Generate actual sample pairs from sampled indices.
         
-        Returns:
-            Tuple of (samples, noisy_samples_for_tracking)
-        """
         samples = []
         
+        def get_full_rejected(rej_entry):
+            return rej_entry["prompt_input_ids"] + rej_entry["generated_input_ids"]
+
         # Generate expert samples
         for idx in expert_indices:
             ex_idx, rej_idx = expert_meta[idx]
@@ -207,7 +234,7 @@ class DITTOCollator(DataCollatorForPreference):
             samples.append((
                 example["prompt_input_ids"],
                 example["chosen_input_ids"],
-                rejected["generated_input_ids"],
+                get_full_rejected(rejected),
             ))
         
         # Generate replay samples
@@ -220,18 +247,16 @@ class DITTOCollator(DataCollatorForPreference):
             samples.append((
                 example["prompt_input_ids"],
                 example["chosen_input_ids"],
-                rejected["generated_input_ids"],
+                get_full_rejected(rejected),
             ))
         
-        # Generate noisy samples and track for logging
+        # Generate noisy samples
         noisy_samples_for_tracking = []
-        
         for idx in noisy_indices:
             prompt_text, step_a, step_b, curr_idx, past_idx, curr_score, past_score = noisy_meta[idx]
             
             current = self.cache[step_a][prompt_text][curr_idx]
             past = self.cache[step_b][prompt_text][past_idx]
-            prompt_input_ids = current["prompt_input_ids"]
             
             past_is_better = (
                 (past_score > curr_score) 
@@ -241,10 +266,11 @@ class DITTOCollator(DataCollatorForPreference):
             chosen = past if past_is_better else current
             rejected = current if past_is_better else past
             
+            # For noisy, BOTH come from cache, so construct both
             samples.append((
-                prompt_input_ids,
-                chosen["generated_input_ids"],
-                rejected["generated_input_ids"],
+                current["prompt_input_ids"],
+                get_full_rejected(chosen),
+                get_full_rejected(rejected),
             ))
             
             noisy_samples_for_tracking.append((
@@ -257,40 +283,57 @@ class DITTOCollator(DataCollatorForPreference):
         return samples, noisy_samples_for_tracking
 
     def _build_batch(self, samples: list[tuple]) -> dict[str, torch.Tensor]:
-        """
-        Build the final batch dictionary from samples.
-        
-        Args:
-            samples: List of (prompt_ids, chosen_ids, rejected_ids) tuples
-        
-        Returns:
-            Batch dictionary with padded tensors and attention masks
-        """
         def attn_mask(input_ids: list[torch.Tensor]) -> list[torch.Tensor]:
             return [torch.ones_like(input_id) for input_id in input_ids]
         
-        keys = ["prompt_input_ids", "chosen_input_ids", "rejected_input_ids"]
+        # samples[i] = (prompt_ids, chosen_ids, rejected_ids)
         
-        raw_tensors = {}
-        for i, key in enumerate(keys):
-            raw_tensors[key] = [torch.as_tensor(sample[i]) for sample in samples]
+        raw_tensors = {"prompt_input_ids": [], "chosen_input_ids": [], "rejected_input_ids": []}
+        raw_labels = {"chosen_labels": [], "rejected_labels": []}
+
+        for p_ids, c_ids, r_ids in samples:
+            # Convert to tensors
+            p_tensor = torch.tensor(p_ids, dtype=torch.long)
+            c_tensor = torch.tensor(c_ids, dtype=torch.long)
+            r_tensor = torch.tensor(r_ids, dtype=torch.long)
+            
+            raw_tensors["prompt_input_ids"].append(p_tensor)
+            raw_tensors["chosen_input_ids"].append(c_tensor)
+            raw_tensors["rejected_input_ids"].append(r_tensor)
+
+            prompt_len = len(p_ids)
+            
+            c_label = c_tensor.clone()
+            c_label[:prompt_len] = -100
+            raw_labels["chosen_labels"].append(c_label)
+            
+            r_label = r_tensor.clone()
+            r_label[:prompt_len] = -100
+            raw_labels["rejected_labels"].append(r_label)
 
         batch = {}
         
-        for name, ids in raw_tensors.items():
+        for name, ids_list in raw_tensors.items():
             padding_side = "left" if "prompt" in name else "right"
             
             batch[name] = pad(
-                ids, 
+                ids_list, 
                 padding_value=self.tokenizer.pad_token_id, 
                 padding_side=padding_side
             )
             
             mask_name = f"{name.split('_')[0]}_attention_mask"
             batch[mask_name] = pad(
-                attn_mask(ids), 
+                attn_mask(ids_list), 
                 padding_value=0, 
                 padding_side=padding_side
+            )
+
+        for name, labels_list in raw_labels.items():
+             batch[name] = pad(
+                labels_list,
+                padding_value=-100,
+                padding_side="right" 
             )
         
         return batch

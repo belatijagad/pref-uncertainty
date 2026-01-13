@@ -59,23 +59,24 @@ training_args:
     gradient_accumulation_steps: 1
     logging_steps: 1
     padding_free: true
+    beta: 0.05
 
 optim_args:
   sft:
-    lr: 2.0e-5 # x10 because of LoRA
+    lr: 1.0e-5 # x10 because of LoRA
     weight_decay: 0
   dpo:
-    lr: 5.0e-6 # x10 because of LoRA
+    lr: 1.0e-6 # x10 because of LoRA
     weight_decay: 0
 
 sampler:
   resample_rate: 10
-  frac_expert: 0.625
-  frac_replay: 0.25
-  frac_noisy: 0.125
-  rescale_batch: 2
+  frac_expert: 0.7
+  frac_replay: 0.2
+  frac_noisy: 0.1
+  rescale_batch: 3
 
   gen_kwargs:
     do_sample: true
-    max_new_tokens: 256
-    num_return_sequences: 4
+    max_new_tokens: 1024
+    num_return_sequences: 10

@@ -90,9 +90,11 @@ def generate_results(
     model_inputs = []
     csv_prompts = prompts 
     
+    # Handle batch size
     gen_kwargs = gen_kwargs.copy()
     batch_size = gen_kwargs.pop("batch_size", 1) 
 
+    # 1. Format all prompts first
     for p in prompts:
         messages = []
 
@@ -112,21 +114,33 @@ def generate_results(
 
     all_completions = []
 
+    # 2. Process in batches
     for i in range(0, len(model_inputs), batch_size):
         batch_prompts = model_inputs[i : i + batch_size]
         
-        _, generated_ids, _, _ = generate_model_outputs(
+        # New utility returns a LIST of tuples: [(prompt_ids, gen_ids, scores, logits), ...]
+        batch_results = generate_model_outputs(
             prompts=batch_prompts,
             model=model,
             tokenizer=tokenizer,
             gen_kwargs=gen_kwargs,
         )
         
-        first_gens = generated_ids[:, 0, :]
-        
-        decoded_batch = tokenizer.batch_decode(first_gens, skip_special_tokens=True)
-        all_completions.extend(decoded_batch)
+        # 3. Iterate through the results list
+        for result in batch_results:
+            # Unpack the tuple (Index 1 is gen_ids)
+            # Tuple structure: (prompt_ids, gen_ids, trans_scores, logits)
+            _, gen_ids, _, _ = result
             
+            # gen_ids shape is [num_return_sequences, seq_len]
+            # We take the first generation (index 0)
+            first_gen_sequence = gen_ids[0]
+            
+            # Decode single sequence
+            decoded_text = tokenizer.decode(first_gen_sequence, skip_special_tokens=True)
+            all_completions.append(decoded_text)
+            
+    # 4. Save to CSV
     for raw_prompt, completion in zip(csv_prompts, all_completions, strict=True):
         clean_prompt = raw_prompt.replace('\n', '\\n')
         responses_dict["prompt"].append(clean_prompt)
@@ -137,7 +151,7 @@ def generate_results(
     responses = pd.DataFrame.from_dict(responses_dict)
     os.makedirs(base_dir, exist_ok=True)
     responses.to_csv(f"{base_dir}/{method_name}.csv", index=False)
-
+    
 @hydra.main(version_base=None, config_path="../configs", config_name="generation")
 def main(config: DictConfig):
     OmegaConf.resolve(config)

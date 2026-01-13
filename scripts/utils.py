@@ -56,49 +56,43 @@ def generate_model_outputs(
     tokenizer: PreTrainedTokenizerBase,
     *,
     gen_kwargs: dict[str, Any],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:    
+):    
     tokenizer.padding_side = "left"
-    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-
-    prompt_ids_list, gen_ids_list, scores_list, logits_list = [], [], [], []
+    
+    # We return a list of tuples to avoid allocating one massive contiguous block
+    results = []
 
     for prompt in prompts:
         inputs = tokenizer(prompt, return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
         prompt_len = inputs["input_ids"].shape[1]
+        
         with torch.inference_mode():
             outputs = model.generate(
                 **inputs,
                 pad_token_id=tokenizer.pad_token_id,
                 output_scores=True,
                 return_dict_in_generate=True,
+                eos_token_id=tokenizer.eos_token_id,
                 **gen_kwargs,
             )
 
-        sequences = outputs.sequences.detach().cpu()              # [n_ret, total_len]
-        scores = [s.detach().cpu() for s in outputs.scores]       # list of [n_ret, vocab]
-        del outputs
+        # Move to CPU immediately to free VRAM
+        sequences = outputs.sequences.detach().cpu()
+        scores = [s.detach().cpu() for s in outputs.scores]
+        del outputs # Free CUDA graph memory
 
-        prompt_ids = sequences[:, :prompt_len].contiguous()       # [n_ret, prompt_len]
-        gen_ids = sequences[:, prompt_len:].contiguous()          # [n_ret, gen_len]
+        # Extract just the new tokens
+        prompt_ids = sequences[:, :prompt_len]
+        gen_ids = sequences[:, prompt_len:]
 
-        logits = torch.stack(scores, dim=1)                       # [n_ret, gen_len, vocab]
+        # Reconstruct Logits [Batch, Seq_Len, Vocab]
+        # We only stack for this specific prompt batch, not the whole dataset
+        logits = torch.stack(scores, dim=1) 
+        
+        # Compute transition scores (log probabilities of the chosen tokens)
         trans_scores = model.compute_transition_scores(sequences, scores, normalize_logits=False)
+        
+        # Append tuple: (prompt_ids, gen_ids, trans_scores, logits)
+        results.append((prompt_ids, gen_ids, trans_scores, logits))
 
-        prompt_ids_list.append(prompt_ids)
-        gen_ids_list.append(gen_ids)
-        scores_list.append(trans_scores)
-        logits_list.append(logits)
-    
-    # Pad to batch
-    pad_id = tokenizer.pad_token_id or 0
-    max_prompt_len = max(t.size(1) for t in prompt_ids_list)
-    max_gen_len = max(t.size(1) for t in gen_ids_list)
-    
-    prompt_input_ids = torch.stack([F.pad(t, (0, max_prompt_len - t.size(1)), value=pad_id) for t in prompt_ids_list], dim=0)
-    generated_input_ids = torch.stack([F.pad(t, (0, max_gen_len - t.size(1)), value=pad_id) for t in gen_ids_list], dim=0)
-
-    max_score_len = max(t.size(1) for t in scores_list)
-    scores_view = torch.stack([F.pad(t, (0, max_score_len - t.size(1)), value=0.0) for t in scores_list], dim=0)
-    logits_view = torch.stack([F.pad(t, (0, 0, 0, max_score_len - t.size(1)), value=0.0) for t in logits_list], dim=0)
-
-    return prompt_input_ids, generated_input_ids, scores_view, logits_view
+    return results

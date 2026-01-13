@@ -50,9 +50,15 @@ def load_author_subset(config):
         .shuffle(seed=config.seed)
     )
 
-    num_samples = min(config.dataset.train_samples_per_author, len(raw_dataset))
-    return raw_dataset.select(range(num_samples))
+    limit = config.dataset.get("train_samples_per_author", None) 
 
+    if limit is None or limit < 1:
+        logger.info(f"Using all available samples ({len(raw_dataset)}) for author {config.dataset.author_id}")
+        return raw_dataset
+
+    num_samples = min(limit, len(raw_dataset))
+    logger.info(f"Subsampling {num_samples} samples for author {config.dataset.author_id}")
+    return raw_dataset.select(range(num_samples))
 
 def build_sft_dataset(raw_dataset, tokenizer):
     """Build SFT dataset by formatting prompt + chosen with chat template."""
@@ -158,7 +164,7 @@ def main(config: DictConfig):
         model.set_adapter(adapter_name)
         
         # Log generations, uncertainty score
-        tracker = Tracker(run_dir=Path("logs") / f"{config.dataset.name}_{config.dataset.author_id}" / f"{name}")
+        tracker = Tracker(run_dir=Path("logs") / f"{config.dataset.name}_{config.dataset.author_id}" / f"{name}", config=config.sampler)
         data_collator = DITTOCollator(
             **config.sampler,
             pad_token_id=tokenizer.pad_token_id,
@@ -190,14 +196,24 @@ def main(config: DictConfig):
                     model, tokenizer, dpo_dataset, data_collator, config.sampler
                 ),
             ],
-            # Track results
             tracker=tracker,
         )
         
-        dpo_trainer.train()
+        train_result = dpo_trainer.train()
+        
+        # 2. Extract metrics from the result
+        metrics = train_result.metrics
+        metrics["train_samples"] = len(dpo_dataset)
+        
+        # 3. Save metrics to file (creates all_results.json, train_results.json, etc.)
+        dpo_trainer.log_metrics("train", metrics)
+        dpo_trainer.save_metrics("train", metrics)
+        dpo_trainer.save_state()
+        
+        # 4. Save the model weights
         dpo_trainer.save_model()
         tracker.save()
-        
+
         # Cleanup
         del dpo_trainer
         model.delete_adapter(adapter_name)

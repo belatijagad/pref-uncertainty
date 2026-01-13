@@ -2,13 +2,14 @@ import json
 from pathlib import Path
 
 class Tracker:
-    def __init__(self, run_dir: str | Path = "logs"):
+    def __init__(self, config: dict, run_dir: str | Path = "logs"):
         self.run_dir = Path(run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
         self.internal_step = 0
         self.gen_file = self.run_dir / "generations.jsonl"
         self.sample_file = self.run_dir / "samples.jsonl"
+        self.config = config
 
         self.generations = []
         self.samples = []
@@ -25,7 +26,8 @@ class Tracker:
         self.samples.append(samples)
 
     def add_metrics(self, metrics: dict[str, any]):
-        self.samples[self.internal_step]["metrics"] = metrics
+        if self.internal_step > self.config.resample_rate:
+            self.samples[self.internal_step - (self.config.resample_rate + 1)]["metrics"] = metrics
         
         self.internal_step += 1
 
