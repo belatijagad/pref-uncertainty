@@ -59,7 +59,11 @@ class MSP(BaseEstimator):
         logprobs: torch.Tensor,
         logits: torch.Tensor,
     ) -> float:
-        return float(logprobs.sum().detach().cpu())
+        mask = torch.isfinite(logprobs)
+        valid_logprobs = logprobs[mask]
+        if valid_logprobs.numel() == 0:
+            return -1e10
+        return float(valid_logprobs.sum().detach().cpu())
 
     @property
     def higher_is_better(self) -> bool:

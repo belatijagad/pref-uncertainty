@@ -117,17 +117,18 @@ def main(config: DictConfig):
     load_dotenv()
     
     provider = config.get("provider", "gemini").lower()
-    
+
     if provider == "openai":
         os.environ["api_key"] = os.environ.get("OPENAI_API_KEY")
-        identifier_key = "batch_id"
-        assert config.get(identifier_key), f"{identifier_key} can't be null; insert arg {identifier_key}=<{identifier_key}> when running the script."
-    else:
+    elif provider == "gemini":
         os.environ["api_key"] = os.environ.get("GEMINI_API_KEY")
-        identifier_key = "job_name"
-        assert config.get(identifier_key), f"{identifier_key} can't be null; insert arg {identifier_key}=<{identifier_key}> when running the script."
+    else:
+        raise ValueError("Test")
+
+    identifier = config.get("batch_identifier", None)
     
-    identifier = config.get(identifier_key)
+    assert identifier is not None, "Identifier can't be null!"
+
     matches = retrieve_results(identifier, provider)
     statistics = process_leaderboard(matches, provider)
     calculate_winrate(statistics)

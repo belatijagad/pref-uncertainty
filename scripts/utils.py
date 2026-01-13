@@ -90,7 +90,7 @@ def generate_model_outputs(
         logits = torch.stack(scores, dim=1) 
         
         # Compute transition scores (log probabilities of the chosen tokens)
-        trans_scores = model.compute_transition_scores(sequences, scores, normalize_logits=False)
+        trans_scores = model.compute_transition_scores(sequences, scores, normalize_logits=True)
         
         # Append tuple: (prompt_ids, gen_ids, trans_scores, logits)
         results.append((prompt_ids, gen_ids, trans_scores, logits))

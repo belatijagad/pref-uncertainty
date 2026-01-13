@@ -2,5 +2,5 @@ hydra:
   run:
     dir: outputs/evaluations
 
-job_name:
-batch_id: 
+provider: openai
+batch_identifier:
