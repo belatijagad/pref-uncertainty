@@ -1,5 +1,4 @@
 import os
-import random
 import logging
 from pathlib import Path
 from typing import Any
@@ -13,7 +12,7 @@ from datasets import Dataset, DatasetDict, IterableDataset, IterableDatasetDict,
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 from huggingface_hub import repo_exists
 
-from scripts.utils import generate_model_outputs, seed_everything, format_response
+from scripts.utils import generate_model_outputs, seed_everything
 from scripts.estimator import ESTIMATOR_MAP
 
 logger = logging.getLogger(__name__)

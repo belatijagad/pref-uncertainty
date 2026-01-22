@@ -8,6 +8,7 @@ wandb/
 uv.lock
 logs/
 tes.ipynb
+analysis/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

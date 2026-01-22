@@ -25,6 +25,9 @@ dependencies = [
     "pydantic>=2.12.4",
     "flash-attn",
     "openai",
+    "seaborn>=0.13.2",
+    "matplotlib>=3.10.8",
+    "scipy>=1.17.0",
 ]
 
 [tool.uv.sources]

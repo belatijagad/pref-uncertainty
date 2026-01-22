@@ -20,7 +20,7 @@ wandb:
   group: "ditto"
 
 lora:
-  r: 16
+  r: 32
   lora_alpha: 64
   lora_dropout: 0.05
   target_modules:
@@ -28,9 +28,6 @@ lora:
     - k_proj
     - v_proj
     - o_proj
-    - gate_proj
-    - down_proj
-    - up_proj
 
 dataset:
   name: ccat50

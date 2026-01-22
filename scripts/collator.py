@@ -66,7 +66,6 @@ class DITTOCollator(DataCollatorForPreference):
         tokenizer: PreTrainedTokenizerBase,
         dataset: Dataset | IterableDataset,
     ) -> None:
-        # [MEMORY CHECK 1] Start
         check_gpu_memory("Resample: Start")
 
         self.sampled_step = step
@@ -76,7 +75,6 @@ class DITTOCollator(DataCollatorForPreference):
         formatted_prompts = list(dataset["prompt"])
         raw_prompts = list(dataset["raw_prompt"]) if "raw_prompt" in dataset.column_names else formatted_prompts
         
-        # 1. Generate 
         generation_results = generate_model_outputs(
             prompts=formatted_prompts,
             model=model,
@@ -84,7 +82,6 @@ class DITTOCollator(DataCollatorForPreference):
             gen_kwargs=self.gen_kwargs,
         )
 
-        # [MEMORY CHECK 2] Peak
         check_gpu_memory("Resample: After Gen (Peak)")
 
         for i, (formatted_prompt, raw_prompt) in enumerate(zip(formatted_prompts, raw_prompts)):
@@ -109,16 +106,12 @@ class DITTOCollator(DataCollatorForPreference):
                 if isinstance(estimator_score, torch.Tensor):
                     estimator_score = estimator_score.item()
 
-                # --- [CRITICAL FIX] STRIP PADDING TOKENS ---
-                # Convert to list and remove pad_token_id
-                # This ensures we don't train the model to predict <pad>
                 raw_gen_list = single_gen_id.tolist()
                 raw_pr_list = pr_ids_batch[j].tolist()
                 
                 saved_gen_ids = [t for t in raw_gen_list if t != self.pad_token_id]
                 saved_pr_ids = [t for t in raw_pr_list if t != self.pad_token_id]
 
-                # Decode to string (Tokenizer handles padding removal too, but we need clean IDs for training)
                 generation_text = tokenizer.decode(saved_gen_ids, skip_special_tokens=True)
                 
                 formatted_response = format_response(

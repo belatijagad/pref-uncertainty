@@ -26,7 +26,6 @@ dataset:
 
 gen_kwargs:
   do_sample: true
-  batch_size: 2
+  batch_size: 1
   num_return_sequences: 1
-  max_new_tokens: 2048
-  repetition_penalty: 1.2
+  max_new_tokens: 1024
