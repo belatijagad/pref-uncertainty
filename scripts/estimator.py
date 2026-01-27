@@ -33,10 +33,10 @@ class RandomEstimator(BaseEstimator):
         input_ids: torch.Tensor,
         logprobs: torch.Tensor,
         logits: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> float:
         seed = int.from_bytes(os.urandom(8), "little")
         self._rng.manual_seed(seed)
-        return torch.rand(1, generator=self._rng, device=logits.device)
+        return float(torch.rand(1, generator=self._rng, device=logits.device).detach().cpu())
 
 
 class MSP(BaseEstimator):
@@ -78,10 +78,14 @@ class MTE(BaseEstimator):
         input_ids: torch.Tensor,
         logprobs: torch.Tensor,
         logits: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> float:
         """Mean Token Entropy"""
         if logits.dim() == 3:
             logits = logits.squeeze(0)
+
+        mask = torch.isfinite(logprobs)
+        if mask.sum() == 0:
+            return float('inf')
 
         all_log_probs = F.log_softmax(logits, dim=-1)
         probs = torch.exp(all_log_probs)
@@ -95,12 +99,39 @@ class MTE(BaseEstimator):
             dim=-1
         )
 
-        return token_entropies.mean()
+        return float(token_entropies.mean().detach().cpu())
+    
+    @property
+    def higher_is_better(self) -> bool:
+        return False
 
+
+class Perplexity(BaseEstimator):
+    def __call__(
+        self,
+        input_ids: torch.Tensor,
+        logprobs: torch.Tensor,
+        logits: torch.Tensor,
+    ) -> torch.Tensor:
+        mask = torch.isfinite(logprobs)
+        valid_logprobs = logprobs[mask]
+        
+        if valid_logprobs.numel() == 0:
+            return float('inf')
+        
+        avg_neg_logprob = -valid_logprobs.mean()
+        perplexity = torch.exp(avg_neg_logprob)
+        
+        return float(perplexity.detach().cpu())
+
+    @property
+    def higher_is_better(self) -> bool:
+        return False
 
 ESTIMATOR_MAP = {
     "None": BaseEstimator(),
     "Random": RandomEstimator(),
     "MSP": MSP(),
     "MTE": MTE(),
+    "PPL": Perplexity(), 
 }

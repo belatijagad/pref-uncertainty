@@ -274,13 +274,12 @@ class DITTOCollator(DataCollatorForPreference):
 
         batch = {}
         for name, ids_list in raw_tensors.items():
-            padding_side = "left" if "prompt" in name else "right"
-            batch[name] = pad(ids_list, padding_value=self.tokenizer.pad_token_id, padding_side=padding_side)
+            batch[name] = pad(ids_list, padding_value=self.tokenizer.pad_token_id, padding_side="left")
             mask_name = f"{name.split('_')[0]}_attention_mask"
             batch[mask_name] = pad(
                 [torch.ones_like(t) for t in ids_list],
                 padding_value=0,
-                padding_side=padding_side,
+                padding_side="left",
             )
 
         for name, labels_list in raw_labels.items():
