@@ -200,6 +200,7 @@ class DITTOCollator(DataCollatorForPreference):
         noisy_indices: list[int],
     ) -> tuple[list[tuple], list[tuple]]:
         samples = []
+        sample_types = []
         noisy_samples_for_tracking = []
 
         # Generate expert samples
@@ -218,6 +219,7 @@ class DITTOCollator(DataCollatorForPreference):
                 prompt_ids + chosen_ids,  # full chosen
                 prompt_ids + rejected_gen_ids,  # full rejected (using example's prompt)
             ))
+            sample_types.append(0)
 
         # Generate replay samples
         for idx in replay_indices:
@@ -234,6 +236,7 @@ class DITTOCollator(DataCollatorForPreference):
                 prompt_ids + chosen_ids,
                 prompt_ids + rejected_gen_ids,
             ))
+            sample_types.append(1)
 
         # Generate noisy samples
         for idx in noisy_indices:
@@ -258,6 +261,7 @@ class DITTOCollator(DataCollatorForPreference):
                 prompt_ids + chosen_gen_ids,
                 prompt_ids + rejected_gen_ids,
             ))
+            sample_types.append(2)
             noisy_samples_for_tracking.append((
                 chosen_cache["generated_input_ids"],
                 rejected_cache["generated_input_ids"],
@@ -265,9 +269,9 @@ class DITTOCollator(DataCollatorForPreference):
                 float(rejected_cache["score"]),
             ))
 
-        return samples, noisy_samples_for_tracking
+        return samples, noisy_samples_for_tracking, sample_types
 
-    def _build_batch(self, samples: list[tuple]) -> dict[str, torch.Tensor]:
+    def _build_batch(self, samples: list[tuple], sample_types: list[int]) -> dict[str, torch.Tensor]:
         prompt_ids_list = []
         chosen_completion_ids_list = []
         rejected_completion_ids_list = []
@@ -332,6 +336,7 @@ class DITTOCollator(DataCollatorForPreference):
             padding_value=0,
             padding_side="right",
         )
+        batch["sample_types"] = torch.tensor(sample_types, dtype=torch.long)
 
         return batch
 
@@ -348,11 +353,11 @@ class DITTOCollator(DataCollatorForPreference):
             self._collect_sample_metadata(examples)
 
         len_superbatch = self.rescale_batch * len(examples)
-        n_expert = int(len_superbatch * self.frac_expert)
-        n_replay = int(len_superbatch * self.frac_replay)
+        n_expert = round(len_superbatch * self.frac_expert)
+        n_replay = round(len_superbatch * self.frac_replay)
         n_noisy = len_superbatch - n_expert - n_replay
 
-        samples, noisy_samples_for_tracking = self._generate_samples_from_indices(
+        samples, noisy_samples_for_tracking, sample_types = self._generate_samples_from_indices(
             examples, expert_meta, replay_meta, noisy_meta,
             self._sample_indices(expert_count, n_expert),
             self._sample_indices(replay_count, n_replay),
@@ -374,4 +379,4 @@ class DITTOCollator(DataCollatorForPreference):
                 ],
             })
 
-        return self._build_batch(samples)
+        return self._build_batch(samples, sample_types)
