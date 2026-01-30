@@ -20,10 +20,8 @@ def format_response(prompt, response, tokenizer, *, add_bos=True):
 
 def format_for_training(prompt, chosen, tokenizer, mode="sft"):
     if mode == "sft":
-        # SFT: return full conversation as-is from chat template
         return {"text": format_response(prompt, chosen, tokenizer, add_bos=False)}
     
-    # DPO: separate prompt and chosen, let tokenizer handle special tokens
     prompt_msgs = [{"role": "user", "content": prompt}]
     prompt_text = tokenizer.apply_chat_template(
         prompt_msgs, tokenize=False, add_generation_prompt=True
@@ -31,8 +29,8 @@ def format_for_training(prompt, chosen, tokenizer, mode="sft"):
     
     return {
         "prompt": prompt_text,
-        "chosen": format_response(prompt, chosen, tokenizer, add_bos=False),
-        "rejected": "",  # Will be filled during training
+        "chosen": chosen,
+        "rejected": "",
     }
 
 
@@ -59,7 +57,6 @@ def generate_model_outputs(
 ):    
     tokenizer.padding_side = "left"
     
-    # We return a list of tuples to avoid allocating one massive contiguous block
     results = []
 
     for prompt in prompts:
@@ -76,23 +73,18 @@ def generate_model_outputs(
                 **gen_kwargs,
             )
 
-        # Move to CPU immediately to free VRAM
         sequences = outputs.sequences.detach().cpu()
         scores = [s.detach().cpu() for s in outputs.scores]
-        del outputs # Free CUDA graph memory
+        del outputs
 
-        # Extract just the new tokens
         prompt_ids = sequences[:, :prompt_len]
         gen_ids = sequences[:, prompt_len:]
 
         # Reconstruct Logits [Batch, Seq_Len, Vocab]
-        # We only stack for this specific prompt batch, not the whole dataset
         logits = torch.stack(scores, dim=1) 
         
-        # Compute transition scores (log probabilities of the chosen tokens)
         trans_scores = model.compute_transition_scores(sequences, scores, normalize_logits=True)
         
-        # Append tuple: (prompt_ids, gen_ids, trans_scores, logits)
         results.append((prompt_ids, gen_ids, trans_scores, logits))
 
     return results

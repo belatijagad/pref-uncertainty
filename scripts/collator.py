@@ -189,11 +189,6 @@ class DITTOCollator(DataCollatorForPreference):
         
         return (expert_meta, replay_meta, noisy_meta, len(expert_meta), len(replay_meta), len(noisy_meta))
 
-    @staticmethod
-    def _get_full_ids(entry: dict) -> list:
-        """Concatenate prompt and generated input IDs from a cache entry."""
-        return entry["prompt_input_ids"] + entry["generated_input_ids"]
-
     def _generate_samples_from_indices(
         self,
         examples: list[dict[str, Any]],
@@ -211,22 +206,33 @@ class DITTOCollator(DataCollatorForPreference):
         for idx in expert_indices:
             ex_idx, rej_idx = expert_meta[idx]
             example = examples[ex_idx]
-            rejected = self.cache[self.sampled_step][example["prompt"]][rej_idx]
+            rejected_cache = self.cache[self.sampled_step][example["prompt"]][rej_idx]
+            
+            prompt_ids = list(example["prompt_input_ids"])
+            chosen_ids = list(example["chosen_input_ids"])
+            # Use generated_input_ids directly (completion only) and prepend example's prompt
+            rejected_gen_ids = list(rejected_cache["generated_input_ids"])
+            
             samples.append((
-                example["prompt_input_ids"],
-                example["chosen_input_ids"],
-                self._get_full_ids(rejected),
+                prompt_ids,
+                prompt_ids + chosen_ids,  # full chosen
+                prompt_ids + rejected_gen_ids,  # full rejected (using example's prompt)
             ))
 
         # Generate replay samples
         for idx in replay_indices:
             ex_idx, step_a, rej_idx = replay_meta[idx]
             example = examples[ex_idx]
-            rejected = self.cache[step_a][example["prompt"]][rej_idx]
+            rejected_cache = self.cache[step_a][example["prompt"]][rej_idx]
+            
+            prompt_ids = list(example["prompt_input_ids"])
+            chosen_ids = list(example["chosen_input_ids"])
+            rejected_gen_ids = list(rejected_cache["generated_input_ids"])
+            
             samples.append((
-                example["prompt_input_ids"],
-                example["chosen_input_ids"],
-                self._get_full_ids(rejected),
+                prompt_ids,
+                prompt_ids + chosen_ids,
+                prompt_ids + rejected_gen_ids,
             ))
 
         # Generate noisy samples
@@ -236,54 +242,96 @@ class DITTOCollator(DataCollatorForPreference):
             past = self.cache[step_b][prompt_text][past_idx]
 
             past_is_better = (past_score > curr_score) if self.higher_is_better else (past_score < curr_score)
-            chosen, rejected = (past, current) if past_is_better else (current, past)
+            chosen_cache, rejected_cache = (past, current) if past_is_better else (current, past)
+            
+            matching_example = next((ex for ex in examples if ex["prompt"] == prompt_text), None)
+            if matching_example is not None:
+                prompt_ids = list(matching_example["prompt_input_ids"])
+            else:
+                prompt_ids = list(current["prompt_input_ids"])
+            
+            chosen_gen_ids = list(chosen_cache["generated_input_ids"])
+            rejected_gen_ids = list(rejected_cache["generated_input_ids"])
 
             samples.append((
-                current["prompt_input_ids"],
-                self._get_full_ids(chosen),
-                self._get_full_ids(rejected),
+                prompt_ids,
+                prompt_ids + chosen_gen_ids,
+                prompt_ids + rejected_gen_ids,
             ))
             noisy_samples_for_tracking.append((
-                chosen["generated_input_ids"],
-                rejected["generated_input_ids"],
-                float(chosen["score"]),
-                float(rejected["score"]),
+                chosen_cache["generated_input_ids"],
+                rejected_cache["generated_input_ids"],
+                float(chosen_cache["score"]),
+                float(rejected_cache["score"]),
             ))
 
         return samples, noisy_samples_for_tracking
 
     def _build_batch(self, samples: list[tuple]) -> dict[str, torch.Tensor]:
-        """Build padded batch tensors from samples. samples[i] = (prompt_ids, chosen_ids, rejected_ids)"""
-        raw_tensors = {"prompt_input_ids": [], "chosen_input_ids": [], "rejected_input_ids": []}
-        raw_labels = {"chosen_labels": [], "rejected_labels": []}
+        prompt_ids_list = []
+        chosen_completion_ids_list = []
+        rejected_completion_ids_list = []
 
-        for p_ids, c_ids, r_ids in samples:
-            p_tensor = torch.tensor(p_ids, dtype=torch.long)
-            c_tensor = torch.tensor(c_ids, dtype=torch.long)
-            r_tensor = torch.tensor(r_ids, dtype=torch.long)
-
-            raw_tensors["prompt_input_ids"].append(p_tensor)
-            raw_tensors["chosen_input_ids"].append(c_tensor)
-            raw_tensors["rejected_input_ids"].append(r_tensor)
-
+        for p_ids, c_full_ids, r_full_ids in samples:
+            p_ids = list(p_ids) if not isinstance(p_ids, list) else p_ids
+            c_full_ids = list(c_full_ids) if not isinstance(c_full_ids, list) else c_full_ids
+            r_full_ids = list(r_full_ids) if not isinstance(r_full_ids, list) else r_full_ids
+            
             prompt_len = len(p_ids)
-            for tensor, label_key in [(c_tensor, "chosen_labels"), (r_tensor, "rejected_labels")]:
-                label = tensor.clone()
-                label[:prompt_len] = -100
-                raw_labels[label_key].append(label)
+            
+            if len(c_full_ids) > prompt_len:
+                chosen_completion = c_full_ids[prompt_len:]
+            else:
+                chosen_completion = c_full_ids
+                
+            if len(r_full_ids) > prompt_len:
+                rejected_completion = r_full_ids[prompt_len:]
+            else:
+                rejected_completion = r_full_ids
+            
+            if len(chosen_completion) == 0:
+                chosen_completion = [self.tokenizer.eos_token_id]
+            if len(rejected_completion) == 0:
+                rejected_completion = [self.tokenizer.eos_token_id]
+            
+            prompt_ids_list.append(torch.tensor(p_ids, dtype=torch.long))
+            chosen_completion_ids_list.append(torch.tensor(chosen_completion, dtype=torch.long))
+            rejected_completion_ids_list.append(torch.tensor(rejected_completion, dtype=torch.long))
 
         batch = {}
-        for name, ids_list in raw_tensors.items():
-            batch[name] = pad(ids_list, padding_value=self.tokenizer.pad_token_id, padding_side="left")
-            mask_name = f"{name.split('_')[0]}_attention_mask"
-            batch[mask_name] = pad(
-                [torch.ones_like(t) for t in ids_list],
-                padding_value=0,
-                padding_side="left",
-            )
-
-        for name, labels_list in raw_labels.items():
-            batch[name] = pad(labels_list, padding_value=-100, padding_side="right")
+        
+        batch["prompt_input_ids"] = pad(
+            prompt_ids_list, 
+            padding_value=self.tokenizer.pad_token_id, 
+            padding_side="left"
+        )
+        batch["prompt_attention_mask"] = pad(
+            [torch.ones_like(t) for t in prompt_ids_list],
+            padding_value=0,
+            padding_side="left",
+        )
+        
+        batch["chosen_input_ids"] = pad(
+            chosen_completion_ids_list, 
+            padding_value=self.tokenizer.pad_token_id, 
+            padding_side="right"
+        )
+        batch["chosen_attention_mask"] = pad(
+            [torch.ones_like(t) for t in chosen_completion_ids_list],
+            padding_value=0,
+            padding_side="right",
+        )
+        
+        batch["rejected_input_ids"] = pad(
+            rejected_completion_ids_list, 
+            padding_value=self.tokenizer.pad_token_id, 
+            padding_side="right"
+        )
+        batch["rejected_attention_mask"] = pad(
+            [torch.ones_like(t) for t in rejected_completion_ids_list],
+            padding_value=0,
+            padding_side="right",
+        )
 
         return batch
 
@@ -325,15 +373,5 @@ class DITTOCollator(DataCollatorForPreference):
                     abs(cs - rs) for _, _, cs, rs in noisy_samples_for_tracking
                 ],
             })
-
-        if not samples and expert_count > 0:
-            ex_idx, rej_idx = expert_meta[0]
-            example = examples[ex_idx]
-            rejected = self.cache[self.sampled_step][example["prompt"]][rej_idx]
-            samples = [(
-                example["prompt_input_ids"],
-                example["chosen_input_ids"],
-                rejected["generated_input_ids"],
-            )]
 
         return self._build_batch(samples)
